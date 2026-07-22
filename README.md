@@ -112,8 +112,12 @@ print("Valid: \(valid)")
 
 ## Binary version compatibility
 
-This SDK requires pdftract 1.1.0. Download from:
+This SDK was generated against pdftract 1.1.0. Download that release from:
 https://github.com/jedarden/pdftract/releases/tag/v1.1.0
+
+The SDK does **not** verify the binary version at runtime, so a mismatched binary
+may fail or return output that does not match this SDK's types. Make sure the
+`pdftract` on your PATH is the release above.
 
 The SDK will search for `pdftract` on your PATH. To specify a custom binary path:
 
@@ -186,13 +190,21 @@ let options = BaseOptions(
 Ensure `pdftract` is on your PATH. The SDK searches PATH for the executable.
 
 ```bash
-# Verify pdftract is available
-pdftract --version
+# Verify pdftract is available and runnable
+pdftract --help
 ```
 
 ### Version mismatch
 
-The SDK will refuse to invoke mismatched binary versions. Install the correct version from the releases page.
+The SDK does not enforce a binary version, so a mismatch is not caught for you.
+To see which version you have installed:
+
+```bash
+pdftract doctor
+```
+
+If it differs from the version under [Binary version compatibility](#binary-version-compatibility),
+install that release and make sure it is first on your PATH.
 
 ### Network failure
 
