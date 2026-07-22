@@ -59,10 +59,19 @@ public struct Pdftract {
 
         do {
             try process.run()
+
+            // Drain stdout/stderr concurrently while the process runs.
+            // Reading them only after waitUntilExit() deadlocks on large
+            // output: once the OS pipe buffer (~64KB on Linux) fills, the
+            // child blocks on write() while we block waiting for it to exit.
+            // Mirrors the streaming methods' concurrent reads.
+            let stdoutTask = Task { outPipe.fileHandleForReading.readDataToEndOfFile() }
+            let stderrTask = Task { errPipe.fileHandleForReading.readDataToEndOfFile() }
+
             process.waitUntilExit()
 
-            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            let outData = await stdoutTask.value
+            let errData = await stderrTask.value
 
             let output = String(data: outData, encoding: .utf8) ?? ""
             let stderr = String(data: errData, encoding: .utf8) ?? ""
