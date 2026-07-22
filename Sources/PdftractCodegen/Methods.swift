@@ -19,13 +19,18 @@ public struct Pdftract {
         if let binaryPath = binaryPath {
             self.binaryPath = binaryPath
         } else {
-            // Search PATH for pdftract
-            self.binaryPath = Self.findBinary() ?? "pdftract"
+            // Resolve pdftract on PATH (cached for the process lifetime).
+            self.binaryPath = Self.resolvedBinaryPath ?? "pdftract"
         }
     }
 
-    /// Finds the pdftract binary on PATH.
-    private static func findBinary() -> String? {
+    /// Resolved pdftract binary path, scanned from PATH exactly once and cached
+    /// for the lifetime of the process. PATH does not change mid-process for
+    /// typical server-side use, so the scan runs a single time and its result
+    /// (including "not found") is reused across every instance rather than
+    /// re-statting each PATH entry on every `init`. `static let` initialization
+    /// is atomically lazy in Swift, so the lookup is also thread-safe.
+    private static let resolvedBinaryPath: String? = {
         #if os(Linux)
         let envPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
         let paths = envPath.split(separator: ":")
@@ -36,12 +41,14 @@ public struct Pdftract {
 
         for path in paths {
             let binaryPath = NSString.path(withComponents: [String(path), "pdftract"])
-            if FileManager.default.fileExists(atPath: binaryPath) {
+            // isExecutableFile (not fileExists) so a non-executable file with the
+            // right name on PATH is not selected only to fail confusingly at exec().
+            if FileManager.default.isExecutableFile(atPath: binaryPath) {
                 return binaryPath
             }
         }
         return nil
-    }
+    }()
 
     /// Executes the pdftract binary with the given arguments.
     /// - Parameter args: Command-line arguments to pass.
