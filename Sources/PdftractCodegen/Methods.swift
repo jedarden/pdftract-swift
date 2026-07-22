@@ -254,11 +254,15 @@ public struct Pdftract {
     /// - Parameters:
     ///   - source: The PDF source (path, URL, or bytes).
     ///   - options: Extraction options.
+    ///   - onSkippedLine: Called once per NDJSON line that failed to decode. Without
+    ///     this the dropped line is lost silently — indistinguishable from a PDF that
+    ///     simply had fewer pages. Default `nil`.
     /// - Returns: An `AsyncThrowingStream` that yields `Page` values.
     /// - Throws: `PdftractError` if extraction fails.
     public func extractStream(
         _ source: Source,
-        options: ExtractOptions = ExtractOptions()
+        options: ExtractOptions = ExtractOptions(),
+        onSkippedLine: (@Sendable (Error) -> Void)? = nil
     ) -> AsyncThrowingStream<Page, Error> {
         return AsyncThrowingStream { continuation in
             Task {
@@ -320,7 +324,9 @@ public struct Pdftract {
                                     let page = try JSONDecoder().decode(Page.self, from: lineData)
                                     continuation.yield(page)
                                 } catch {
-                                    // Skip malformed lines; the final error will be reported if needed
+                                    // Surface undecodable lines via onSkippedLine instead of
+                                    // swallowing them — silent drops mask truncation/CLI/schema drift.
+                                    if let onSkippedLine { onSkippedLine(error) }
                                 }
                             }
                         }
@@ -333,7 +339,9 @@ public struct Pdftract {
                                 let page = try JSONDecoder().decode(Page.self, from: Data(buffer))
                                 continuation.yield(page)
                             } catch {
-                                // Skip malformed lines
+                                // Surface undecodable lines via onSkippedLine instead of
+                                // swallowing them — silent drops mask truncation/CLI/schema drift.
+                                if let onSkippedLine { onSkippedLine(error) }
                             }
                         }
                     }
@@ -362,12 +370,16 @@ public struct Pdftract {
     ///   - source: The PDF source (path, URL, or bytes).
     ///   - pattern: The text pattern to search for.
     ///   - options: Search options.
+    ///   - onSkippedLine: Called once per NDJSON line that failed to decode. Without
+    ///     this the dropped line is lost silently — indistinguishable from output that
+    ///     simply had fewer matches. Default `nil`.
     /// - Returns: An `AsyncThrowingStream` that yields `Match` values.
     /// - Throws: `PdftractError` if search fails.
     public func search(
         _ source: Source,
         _ pattern: String,
-        options: SearchOptions = SearchOptions()
+        options: SearchOptions = SearchOptions(),
+        onSkippedLine: (@Sendable (Error) -> Void)? = nil
     ) -> AsyncThrowingStream<Match, Error> {
         return AsyncThrowingStream { continuation in
             Task {
@@ -426,7 +438,9 @@ public struct Pdftract {
                                     let match = try JSONDecoder().decode(Match.self, from: lineData)
                                     continuation.yield(match)
                                 } catch {
-                                    // Skip malformed lines
+                                    // Surface undecodable lines via onSkippedLine instead of
+                                    // swallowing them — silent drops mask truncation/CLI/schema drift.
+                                    if let onSkippedLine { onSkippedLine(error) }
                                 }
                             }
                         }
@@ -439,7 +453,9 @@ public struct Pdftract {
                                 let match = try JSONDecoder().decode(Match.self, from: Data(buffer))
                                 continuation.yield(match)
                             } catch {
-                                // Skip malformed lines
+                                // Surface undecodable lines via onSkippedLine instead of
+                                // swallowing them — silent drops mask truncation/CLI/schema drift.
+                                if let onSkippedLine { onSkippedLine(error) }
                             }
                         }
                     }
