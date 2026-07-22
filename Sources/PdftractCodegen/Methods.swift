@@ -148,7 +148,9 @@ public struct Pdftract {
         options: ExtractOptions = ExtractOptions()
     ) async throws -> Document {
         var args = ["extract", "--json"]
-        args.append(contentsOf: try source.toArgs())
+        let prepared = try source.toArgs()
+        defer { prepared.cleanUp() }
+        args.append(contentsOf: prepared.arguments)
         args.append(contentsOf: options.toArgs())
 
         let output = try await exec(args)
@@ -176,7 +178,9 @@ public struct Pdftract {
         options: ExtractOptions = ExtractOptions()
     ) async throws -> String {
         var args = ["extract"]
-        args.append(contentsOf: try source.toArgs())
+        let prepared = try source.toArgs()
+        defer { prepared.cleanUp() }
+        args.append(contentsOf: prepared.arguments)
         args.append(contentsOf: options.toArgs())
         
         args.append("--text")
@@ -213,7 +217,9 @@ public struct Pdftract {
         options: ExtractOptions = ExtractOptions()
     ) async throws -> String {
         var args = ["extract"]
-        args.append(contentsOf: try source.toArgs())
+        let prepared = try source.toArgs()
+        defer { prepared.cleanUp() }
+        args.append(contentsOf: prepared.arguments)
         args.append(contentsOf: options.toArgs())
         
         args.append("--md")
@@ -250,13 +256,19 @@ public struct Pdftract {
         return AsyncThrowingStream { continuation in
             Task {
                 var args = ["extract", "--ndjson"]
+                let prepared: PreparedArgs
                 do {
-                    args.append(contentsOf: try source.toArgs())
+                    prepared = try source.toArgs()
+                    args.append(contentsOf: prepared.arguments)
                     args.append(contentsOf: options.toArgs())
                 } catch {
                     continuation.finish(throwing: error)
                     return
                 }
+                // Remove any spilled temp file (e.g. Source.bytes) once the
+                // process has finished — covers success, error, and the
+                // cancellation path (onTermination terminates then exits).
+                defer { prepared.cleanUp() }
 
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: binaryPath)
@@ -353,13 +365,16 @@ public struct Pdftract {
         return AsyncThrowingStream { continuation in
             Task {
                 var args = ["grep", pattern]
+                let prepared: PreparedArgs
                 do {
-                    args.append(contentsOf: try source.toArgs())
+                    prepared = try source.toArgs()
+                    args.append(contentsOf: prepared.arguments)
                     args.append(contentsOf: options.toArgs())
                 } catch {
                     continuation.finish(throwing: error)
                     return
                 }
+                defer { prepared.cleanUp() }
 
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: binaryPath)
@@ -462,7 +477,9 @@ public struct Pdftract {
         "extract", "--metadata-only", "--json"
         
         ]
-        args.append(contentsOf: try source.toArgs())
+        let prepared = try source.toArgs()
+        defer { prepared.cleanUp() }
+        args.append(contentsOf: prepared.arguments)
         
         args.append(contentsOf: options.toArgs())
         
@@ -500,7 +517,9 @@ public struct Pdftract {
         "hash", "--json"
         
         ]
-        args.append(contentsOf: try source.toArgs())
+        let prepared = try source.toArgs()
+        defer { prepared.cleanUp() }
+        args.append(contentsOf: prepared.arguments)
         
         args.append(contentsOf: options.toArgs())
         
@@ -535,7 +554,9 @@ public struct Pdftract {
         "classify", "--json"
         
         ]
-        args.append(contentsOf: try source.toArgs())
+        let prepared = try source.toArgs()
+        defer { prepared.cleanUp() }
+        args.append(contentsOf: prepared.arguments)
         
 
         let output = try await exec(args)

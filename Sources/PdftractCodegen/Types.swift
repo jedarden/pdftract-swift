@@ -15,20 +15,50 @@ public enum Source {
     case url(URL)
     case bytes(Data)
 
-    /// Converts the source to CLI arguments.
-    /// - Returns: Array of argument strings to pass to the pdftract binary.
-    func toArgs() throws -> [String] {
+    /// Converts the source to CLI arguments, tracking any temporary files
+    /// that had to be materialized on disk so they can be removed once the
+    /// pdftract process no longer needs them.
+    /// - Returns: The prepared arguments plus any temp files to clean up.
+    func toArgs() throws -> PreparedArgs {
         switch self {
         case .path(let path):
-            return [path]
+            return PreparedArgs(arguments: [path])
         case .url(let url):
-            return [url.absoluteString]
+            return PreparedArgs(arguments: [url.absoluteString])
         case .bytes(let data):
-            // Write bytes to a temporary file and return its path
+            // Spill the bytes to a temporary file so the CLI can read them.
+            // The caller owns the returned `PreparedArgs` and must `cleanUp()`
+            // (typically via `defer`) once the pdftract process has finished —
+            // otherwise the file leaks in the shared temp directory, and for
+            // documents passed in-memory to avoid touching disk, the content
+            // would persist there indefinitely.
             let tempDir = FileManager.default.temporaryDirectory
             let tempFile = tempDir.appendingPathComponent("pdftract-input-\(UUID().uuidString).pdf")
             try data.write(to: tempFile)
-            return [tempFile.path]
+            return PreparedArgs(arguments: [tempFile.path], temporaryFiles: [tempFile])
+        }
+    }
+}
+
+/// CLI arguments prepared from a `Source`, together with any temporary files
+/// that were spilled to disk and must be removed after the pdftract process
+/// runs (e.g. the backing file for `Source.bytes`).
+struct PreparedArgs: Sendable {
+    /// Argument strings to pass to the pdftract binary.
+    let arguments: [String]
+    /// Temporary files created for this invocation; removed by `cleanUp()`.
+    let temporaryFiles: [URL]
+
+    init(arguments: [String], temporaryFiles: [URL] = []) {
+        self.arguments = arguments
+        self.temporaryFiles = temporaryFiles
+    }
+
+    /// Removes any temporary files owned by these prepared arguments.
+    /// Idempotent; safe on the success, error, and cancellation paths.
+    func cleanUp() {
+        for url in temporaryFiles {
+            try? FileManager.default.removeItem(at: url)
         }
     }
 }
