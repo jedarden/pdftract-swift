@@ -143,7 +143,7 @@ public struct Pdftract {
     ///   - options: Extraction options.
     /// - Returns: The complete document structure.
     /// - Throws: `PdftractError` if extraction fails.
-    public func Extract(
+    public func extract(
         _ source: Source,
         options: ExtractOptions = ExtractOptions()
     ) async throws -> Document {
@@ -171,7 +171,7 @@ public struct Pdftract {
     ///   - options: Extraction options.
     /// - Returns: The extracted text.
     /// - Throws: `PdftractError` if extraction fails.
-    public func ExtractText(
+    public func extractText(
         _ source: Source,
         options: ExtractOptions = ExtractOptions()
     ) async throws -> String {
@@ -208,7 +208,7 @@ public struct Pdftract {
     ///   - options: Extraction options.
     /// - Returns: The extracted text.
     /// - Throws: `PdftractError` if extraction fails.
-    public func ExtractMarkdown(
+    public func extractMarkdown(
         _ source: Source,
         options: ExtractOptions = ExtractOptions()
     ) async throws -> String {
@@ -243,7 +243,7 @@ public struct Pdftract {
     ///   - options: Extraction options.
     /// - Returns: An `AsyncThrowingStream` that yields `Page` values.
     /// - Throws: `PdftractError` if extraction fails.
-    public func ExtractStream(
+    public func extractStream(
         _ source: Source,
         options: ExtractOptions = ExtractOptions()
     ) -> AsyncThrowingStream<Page, Error> {
@@ -345,7 +345,7 @@ public struct Pdftract {
     ///   - options: Search options.
     /// - Returns: An `AsyncThrowingStream` that yields `Match` values.
     /// - Throws: `PdftractError` if search fails.
-    public func Search(
+    public func search(
         _ source: Source,
         _ pattern: String,
         options: SearchOptions = SearchOptions()
@@ -451,7 +451,7 @@ public struct Pdftract {
     /// - Returns: The document metadata.
     
     /// - Throws: `PdftractError` if operation fails.
-    public func GetMetadata(
+    public func getMetadata(
         _ source: Source
         
         , options: BaseOptions = BaseOptions()
@@ -489,7 +489,7 @@ public struct Pdftract {
     /// - Returns: The document fingerprint.
     
     /// - Throws: `PdftractError` if operation fails.
-    public func Hash(
+    public func hash(
         _ source: Source
         
         , options: HashOptions = HashOptions()
@@ -526,7 +526,7 @@ public struct Pdftract {
     /// - Returns: The classification result.
     
     /// - Throws: `PdftractError` if operation fails.
-    public func Classify(
+    public func classify(
         _ source: Source
         
     ) async throws -> Classification {
@@ -556,7 +556,7 @@ public struct Pdftract {
     ///   - receipt: The receipt data to verify.
     /// - Returns: `true` if the receipt is valid, `false` otherwise.
     /// - Throws: `PdftractError` if verification fails (not receipt validation failure).
-    public func VerifyReceipt(_ path: String, receipt: Receipt) async throws -> Bool {
+    public func verifyReceipt(_ path: String, receipt: Receipt) async throws -> Bool {
         let output = try await exec(["verify-receipt", path, receipt.data])
         return output.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
     }
