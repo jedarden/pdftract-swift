@@ -315,3 +315,31 @@ public struct Classification: Codable, Sendable {
 public struct Receipt: Codable, Sendable {
     public let data: String
 }
+
+/// Result of verifying a receipt against a PDF.
+///
+/// Decode of the `pdftract verify-receipt --json` output. `valid` is `true` when the
+/// receipt matched (`status == "ok"`); when `false`, `reason` carries the CLI's
+/// explanation of which check failed (fingerprint, bbox, or content hash).
+public struct ReceiptVerificationResult: Codable, Sendable {
+    /// Raw verification status reported by the CLI
+    /// (`"ok"`, `"fingerprint_mismatch"`, `"bbox_mismatch"`, or `"content_mismatch"`).
+    public let status: String
+    /// Best span intersection-over-union observed during verification.
+    public let bestIou: Double
+    public let expectedContentHash: String?
+    public let actualContentHash: String?
+    /// Human-readable explanation of why verification failed; `nil` when the receipt is valid.
+    public let reason: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case bestIou = "best_iou"
+        case expectedContentHash = "expected_content_hash"
+        case actualContentHash = "actual_content_hash"
+        case reason = "error"
+    }
+
+    /// `true` when the receipt verified successfully (`status == "ok"`).
+    public var valid: Bool { status == "ok" }
+}

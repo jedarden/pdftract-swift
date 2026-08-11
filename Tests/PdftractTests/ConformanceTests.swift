@@ -141,10 +141,10 @@ final class ConformanceTests: XCTestCase {
         }
 
         let receiptStruct = Receipt(data: receipt)
-        let valid = try await client.verifyReceipt(fixturePath, receipt: receiptStruct)
+        let result = try await client.verifyReceipt(fixturePath, receipt: receiptStruct)
 
         if let expectedValid = assertions?["valid"] as? Bool {
-            XCTAssertEqual(valid, expectedValid)
+            XCTAssertEqual(result.valid, expectedValid)
         }
     }
 

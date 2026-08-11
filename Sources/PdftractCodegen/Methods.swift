@@ -594,15 +594,21 @@ public struct Pdftract {
     
     
     
-    /// Verifies a receipt.
+    /// Verifies a receipt against a PDF.
     /// - Parameters:
     ///   - path: Path to the PDF file.
     ///   - receipt: The receipt data to verify.
-    /// - Returns: `true` if the receipt is valid, `false` otherwise.
-    /// - Throws: `PdftractError` if verification fails (not receipt validation failure).
-    public func verifyReceipt(_ path: String, receipt: Receipt) async throws -> Bool {
-        let output = try await exec(["verify-receipt", path, receipt.data])
-        return output.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
+    /// - Returns: A `ReceiptVerificationResult`. Its `valid` property is `true` when the
+    ///   receipt matches; when invalid, `reason` describes which verification check failed.
+    /// - Throws: `PdftractError` if the CLI invocation itself fails (not a receipt validation failure).
+    public func verifyReceipt(_ path: String, receipt: Receipt) async throws -> ReceiptVerificationResult {
+        let output = try await exec(["verify-receipt", path, receipt.data, "--json"])
+
+        guard let data = output.data(using: .utf8) else {
+            throw PdftractError("Failed to decode output", -1)
+        }
+
+        return try JSONDecoder().decode(ReceiptVerificationResult.self, from: data)
     }
 
     
