@@ -187,6 +187,21 @@ final class ConformanceTests: XCTestCase {
 /// test drives a fake `pdftract` binary that emits 128 KiB of stderr — twice
 /// the pipe buffer — and asserts the stream still drains. A watchdog turns a
 /// revived deadlock into a failed assertion instead of a wedged test run.
+///
+/// The watchdog polls a detached consumer rather than awaiting it in a task
+/// group, because a consumer wedged in the blocking `readData(ofLength:)`
+/// never finishes and `withTaskGroup` cannot return until every child does —
+/// so `group.next()` and the implicit group drain hang forever. The wedged
+/// task never observes its cancellation either (it is stuck in a blocking
+/// read, not a suspension point), which is why the `cancelAll()` fallback
+/// could not save the old harness: the stream's `onTermination`, and with it
+/// `process.terminate()`, is never reached. Instead the watchdog SIGKILLs the
+/// fake child (via the pidfile it writes) once the budget is spent: the shell
+/// is the only holder of the SDK's stdout write end — its wedged pipeline
+/// children redirect theirs away — so its death EOFs the deadlocked read and
+/// unwedges the leaked consumer after the test case has already failed.
+/// SIGKILL rather than SIGTERM because only SIGKILL cannot be deferred or
+/// blocked; dash dies to either, but nothing guarantees that of a future fake.
 final class StreamingStderrRegressionTests: XCTestCase {
     /// KiB of stderr the fake binaries emit: 2x the ~64KB Linux pipe buffer.
     private static let stderrKiB = 128
@@ -215,18 +230,23 @@ final class StreamingStderrRegressionTests: XCTestCase {
 
     /// Writes an executable fake `pdftract` that prints `stdoutLines` on
     /// stdout, writes `stderrKiB` KiB of filler to stderr (optionally followed
-    /// by `stderrTailMarker`), and exits with `exitCode`. The child ignores its
-    /// arguments entirely, so tests can pass any `Source`.
+    /// by `stderrTailMarker`), and exits with `exitCode`. The child records its
+    /// shell pid in a pidfile so the watchdog can SIGKILL it if it deadlocks.
+    /// It ignores its arguments entirely, so tests can pass any `Source`.
     private static func writeFakeBinary(
         stdoutLines: [String],
         trailingStderrMarker: Bool,
         exitCode: Int
-    ) throws -> (directory: URL, binaryPath: String) {
+    ) throws -> (directory: URL, binaryPath: String, pidPath: String) {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdftract-stderr-regression-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
+        let binaryPath = directory.appendingPathComponent("pdftract").path
+        let pidPath = directory.appendingPathComponent("pid").path
+
         var script = "#!/bin/sh\n"
+        script += "echo $$ > '\(pidPath)'\n"
         for line in stdoutLines {
             script += "echo '\(line)'\n"
         }
@@ -236,10 +256,9 @@ final class StreamingStderrRegressionTests: XCTestCase {
         }
         script += "exit \(exitCode)\n"
 
-        let binaryPath = directory.appendingPathComponent("pdftract").path
         try script.write(toFile: binaryPath, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binaryPath)
-        return (directory, binaryPath)
+        return (directory, binaryPath, pidPath)
     }
 
     private struct DrainOutcome {
@@ -250,32 +269,69 @@ final class StreamingStderrRegressionTests: XCTestCase {
         var finished = true
     }
 
+    /// Handoff for the detached consumer's outcome. An actor (not a locked
+    /// struct) so the polling loop can await it without blocking a cooperative
+    /// thread.
+    private actor DrainBox {
+        private var stored: DrainOutcome?
+
+        func store(_ outcome: DrainOutcome) {
+            guard stored == nil else { return }
+            stored = outcome
+        }
+
+        var outcome: DrainOutcome? { stored }
+    }
+
+    /// Best-effort SIGKILL of the fake child through its pidfile. SIGKILL, not
+    /// SIGTERM: dash defers the latter while it is stuck in write() (see the
+    /// class comment), while SIGKILL cannot be blocked. Killing the shell is
+    /// enough — it is the only holder of the SDK's stdout write end, so its
+    /// death EOFs the deadlocked read and unblocks the leaked consumer task.
+    private static func killFakeChild(pidPath: String) {
+        guard let raw = try? String(contentsOfFile: pidPath, encoding: .utf8),
+              let pid = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return
+        }
+        kill(pid, SIGKILL)
+    }
+
     /// Consumes `stream` to completion and reports how many values it yielded
     /// plus its terminal error, guarded by a watchdog. A stderr backpressure
-    /// deadlock surfaces as `finished == false` rather than hanging the suite.
+    /// deadlock surfaces as `finished == false` rather than hanging the suite:
+    /// the consumer runs detached (a deadlocked one can be neither joined nor
+    /// cancelled) and the watchdog kills the fake child before returning.
     private static func drain<T>(
-        _ makeStream: @escaping () -> AsyncThrowingStream<T, Error>
+        _ makeStream: @escaping () -> AsyncThrowingStream<T, Error>,
+        killChild: @escaping @Sendable () -> Void
     ) async -> DrainOutcome {
-        await withTaskGroup(of: DrainOutcome.self) { group in
-            group.addTask {
-                var outcome = DrainOutcome()
-                do {
-                    for try await _ in makeStream() {
-                        outcome.valueCount += 1
-                    }
-                } catch {
-                    outcome.error = error
+        let box = DrainBox()
+        Task.detached {
+            var outcome = DrainOutcome()
+            do {
+                for try await _ in makeStream() {
+                    outcome.valueCount += 1
                 }
-                return outcome
+            } catch {
+                outcome.error = error
             }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: watchdogSeconds * 1_000_000_000)
+            await box.store(outcome)
+        }
+
+        // Poll instead of awaiting the consumer so a deadlock returns control
+        // to the test case and fails an assertion instead of wedging the run.
+        let tickNanos: UInt64 = 50_000_000
+        let maxTicks = Int(watchdogSeconds) * 20
+        var ticks = 0
+        while await box.outcome == nil {
+            if ticks >= maxTicks {
+                killChild()
                 return DrainOutcome(finished: false)
             }
-            let first = await group.next() ?? DrainOutcome(finished: false)
-            group.cancelAll()
-            return first
+            try? await Task.sleep(nanoseconds: tickNanos)
+            ticks += 1
         }
+        return await box.outcome!
     }
 
     func testExtractStreamDrainsStderrOverPipeBuffer() async throws {
@@ -287,7 +343,10 @@ final class StreamingStderrRegressionTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fake.directory) }
 
         let client = Pdftract(binaryPath: fake.binaryPath)
-        let outcome = await Self.drain { client.extractStream(.path("/does/not/matter.pdf")) }
+        let outcome = await Self.drain(
+            { client.extractStream(.path("/does/not/matter.pdf")) },
+            killChild: { Self.killFakeChild(pidPath: fake.pidPath) }
+        )
 
         XCTAssertTrue(outcome.finished, "extractStream hung: >64KiB of stderr deadlocked the stream")
         XCTAssertNil(outcome.error, "exit code 0 should not throw: \(String(describing: outcome.error))")
@@ -303,7 +362,10 @@ final class StreamingStderrRegressionTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fake.directory) }
 
         let client = Pdftract(binaryPath: fake.binaryPath)
-        let outcome = await Self.drain { client.search(.path("/does/not/matter.pdf"), "needle") }
+        let outcome = await Self.drain(
+            { client.search(.path("/does/not/matter.pdf"), "needle") },
+            killChild: { Self.killFakeChild(pidPath: fake.pidPath) }
+        )
 
         XCTAssertTrue(outcome.finished, "search hung: >64KiB of stderr deadlocked the stream")
         XCTAssertNil(outcome.error, "exit code 0 should not throw: \(String(describing: outcome.error))")
@@ -319,7 +381,10 @@ final class StreamingStderrRegressionTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fake.directory) }
 
         let client = Pdftract(binaryPath: fake.binaryPath)
-        let outcome = await Self.drain { client.extractStream(.path("/does/not/matter.pdf")) }
+        let outcome = await Self.drain(
+            { client.extractStream(.path("/does/not/matter.pdf")) },
+            killChild: { Self.killFakeChild(pidPath: fake.pidPath) }
+        )
 
         XCTAssertTrue(outcome.finished, "extractStream hung: >64KiB of stderr deadlocked the stream")
         guard let error = outcome.error else {
@@ -346,7 +411,10 @@ final class StreamingStderrRegressionTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fake.directory) }
 
         let client = Pdftract(binaryPath: fake.binaryPath)
-        let outcome = await Self.drain { client.search(.path("/does/not/matter.pdf"), "needle") }
+        let outcome = await Self.drain(
+            { client.search(.path("/does/not/matter.pdf"), "needle") },
+            killChild: { Self.killFakeChild(pidPath: fake.pidPath) }
+        )
 
         XCTAssertTrue(outcome.finished, "search hung: >64KiB of stderr deadlocked the stream")
         guard let error = outcome.error else {
