@@ -296,13 +296,23 @@ public struct Pdftract {
                     try process.run()
 
                     let outHandle = outPipe.fileHandleForReading
-                    let errHandle = errPipe.fileHandleForReading
 
-                    // Read lines incrementally
+                    // Drain stderr concurrently with stdout. Reading stderr
+                    // only after waitUntilExit() deadlocks once the child
+                    // writes more than the OS pipe buffer (~64KB on Linux):
+                    // the child blocks in write(stderr) while this task blocks
+                    // on stdout, so neither side ever finishes. Mirrors the
+                    // buffered exec path, which drains both pipes this way.
+                    let stderrTask = Task { errPipe.fileHandleForReading.readDataToEndOfFile() }
+
+                    // Read lines incrementally. Loop to EOF rather than while
+                    // `process.isRunning`: a child that exits between two reads
+                    // can still leave buffered stdout behind, and EOF is the
+                    // only signal that stdout is fully drained.
                     var buffer = [UInt8]()
                     let readSize = 4096
 
-                    while process.isRunning {
+                    while true {
                         let data = outHandle.readData(ofLength: readSize)
                         if data.isEmpty {
                             break
@@ -344,9 +354,14 @@ public struct Pdftract {
 
                     process.waitUntilExit()
 
+                    // The child has exited, so the concurrent drain above has
+                    // hit EOF and awaiting it cannot block. It must be complete
+                    // before mapError so the error carries all of stderr rather
+                    // than whatever happened to fit in the pipe buffer.
+                    let errData = await stderrTask.value
+                    let stderr = String(data: errData, encoding: .utf8) ?? ""
+
                     if process.terminationStatus != 0 {
-                        let errData = errHandle.readDataToEndOfFile()
-                        let stderr = String(data: errData, encoding: .utf8) ?? ""
                         continuation.finish(throwing: mapError(stderr, Int(process.terminationStatus)))
                     } else {
                         continuation.finish()
@@ -410,13 +425,23 @@ public struct Pdftract {
                     try process.run()
 
                     let outHandle = outPipe.fileHandleForReading
-                    let errHandle = errPipe.fileHandleForReading
 
-                    // Read lines incrementally
+                    // Drain stderr concurrently with stdout. Reading stderr
+                    // only after waitUntilExit() deadlocks once the child
+                    // writes more than the OS pipe buffer (~64KB on Linux):
+                    // the child blocks in write(stderr) while this task blocks
+                    // on stdout, so neither side ever finishes. Mirrors the
+                    // buffered exec path, which drains both pipes this way.
+                    let stderrTask = Task { errPipe.fileHandleForReading.readDataToEndOfFile() }
+
+                    // Read lines incrementally. Loop to EOF rather than while
+                    // `process.isRunning`: a child that exits between two reads
+                    // can still leave buffered stdout behind, and EOF is the
+                    // only signal that stdout is fully drained.
                     var buffer = [UInt8]()
                     let readSize = 4096
 
-                    while process.isRunning {
+                    while true {
                         let data = outHandle.readData(ofLength: readSize)
                         if data.isEmpty {
                             break
@@ -458,9 +483,14 @@ public struct Pdftract {
 
                     process.waitUntilExit()
 
+                    // The child has exited, so the concurrent drain above has
+                    // hit EOF and awaiting it cannot block. It must be complete
+                    // before mapError so the error carries all of stderr rather
+                    // than whatever happened to fit in the pipe buffer.
+                    let errData = await stderrTask.value
+                    let stderr = String(data: errData, encoding: .utf8) ?? ""
+
                     if process.terminationStatus != 0 {
-                        let errData = errHandle.readDataToEndOfFile()
-                        let stderr = String(data: errData, encoding: .utf8) ?? ""
                         continuation.finish(throwing: mapError(stderr, Int(process.terminationStatus)))
                     } else {
                         continuation.finish()
