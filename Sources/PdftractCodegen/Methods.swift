@@ -101,10 +101,6 @@ public struct Pdftract {
     ///   - exitCode: The exit code.
     /// - Returns: A `PdftractError` subclass.
     private func mapError(_ stderr: String, _ exitCode: Int) -> PdftractError {
-        guard let exitCode = exitCode else {
-            return PdftractError(stderr, -1)
-        }
-
         switch exitCode {
         
         
@@ -334,7 +330,7 @@ public struct Pdftract {
 
                     // Process remaining buffer
                     if !buffer.isEmpty {
-                        if let lineString = String(data: buffer, encoding: .utf8), !lineString.isEmpty {
+                        if let lineString = String(bytes: buffer, encoding: .utf8), !lineString.isEmpty {
                             do {
                                 let page = try JSONDecoder().decode(Page.self, from: Data(buffer))
                                 continuation.yield(page)
@@ -448,7 +444,7 @@ public struct Pdftract {
 
                     // Process remaining buffer
                     if !buffer.isEmpty {
-                        if let lineString = String(data: buffer, encoding: .utf8), !lineString.isEmpty {
+                        if let lineString = String(bytes: buffer, encoding: .utf8), !lineString.isEmpty {
                             do {
                                 let match = try JSONDecoder().decode(Match.self, from: Data(buffer))
                                 continuation.yield(match)

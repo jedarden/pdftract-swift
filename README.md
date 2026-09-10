@@ -106,8 +106,11 @@ print("Confidence: \(classification.confidence)")
 
 ```swift
 let receipt = Receipt(data: "...")
-let valid = try await client.verifyReceipt("/path/to/receipt.pdf", receipt: receipt)
-print("Valid: \(valid)")
+let result = try await client.verifyReceipt("/path/to/receipt.pdf", receipt: receipt)
+print("Valid: \(result.valid)")
+if let reason = result.reason {
+    print("Verification failed: \(reason)")
+}
 ```
 
 ## Binary version compatibility

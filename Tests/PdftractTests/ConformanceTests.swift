@@ -154,7 +154,7 @@ final class ConformanceTests: XCTestCase {
         }
 
         var matchCount = 0
-        for await _ in client.search(.path(fixturePath), pattern) {
+        for try await _ in client.search(.path(fixturePath), pattern) {
             matchCount += 1
             if let maxResults = assertions?["max_results"] as? Int, matchCount >= maxResults {
                 break
@@ -168,7 +168,7 @@ final class ConformanceTests: XCTestCase {
 
     private func testExtractStream(_ fixturePath: String, assertions: [String: Any]?) async throws {
         var pageCount = 0
-        for await _ in client.extractStream(.path(fixturePath)) {
+        for try await _ in client.extractStream(.path(fixturePath)) {
             pageCount += 1
         }
 

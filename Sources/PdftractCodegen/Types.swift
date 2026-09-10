@@ -297,7 +297,7 @@ public struct Fingerprint: Codable, Sendable {
     public let metadata: Metadata
 
     private enum CodingKeys: String, CodingKey {
-        case hash, pageCount, fastHash, metadata
+        case hash, metadata
         case pageCount = "page_count"
         case fastHash = "fast_hash"
     }
@@ -314,6 +314,14 @@ public struct Classification: Codable, Sendable {
 /// Receipt for verification.
 public struct Receipt: Codable, Sendable {
     public let data: String
+
+    /// Wraps a raw receipt string (the output of `pdftract receipt`) so it can
+    /// be handed back to `verifyReceipt`. Public because receipts arrive from
+    /// the CLI as opaque strings — decoding a JSON envelope is not how callers
+    /// get one.
+    public init(data: String) {
+        self.data = data
+    }
 }
 
 /// Result of verifying a receipt against a PDF.

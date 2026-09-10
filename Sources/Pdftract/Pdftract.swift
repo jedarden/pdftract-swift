@@ -26,7 +26,11 @@ public typealias Match = PdftractCodegen.Match
 public typealias Fingerprint = PdftractCodegen.Fingerprint
 public typealias Classification = PdftractCodegen.Classification
 public typealias Receipt = PdftractCodegen.Receipt
+public typealias ReceiptVerificationResult = PdftractCodegen.ReceiptVerificationResult
 public typealias PdftractError = PdftractCodegen.PdftractError
+
+// SDK-internal error (not CLI-exit-code-driven) for undecodable NDJSON stream lines.
+public typealias MalformedStreamError = PdftractCodegen.MalformedStreamError
 
 
 
