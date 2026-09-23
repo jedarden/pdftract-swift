@@ -14,6 +14,14 @@ file starts honestly, at the point this artifact-improvement audit found the rep
 reconstructing a retroactive history. See `README.md` for the full usage/API reference; this
 file is for decisions and forward-looking notes.
 
+The first hand-written `docs/notes/` document is
+[`docs/notes/codegen-refresh.md`](../notes/codegen-refresh.md) — how to regenerate this repo
+from the pdftract codegen pipeline (which command emits which paths, `.codegen-version`
+lockstep with binary releases, how to read `pdftract sdk validate` findings, and the
+fix-upstream-then-regenerate rule that ADR-1 depends on), plus a CI map of which
+iad-ci workflow runs where and why bare `swift test` cannot pass without the real
+binary installed.
+
 ## Current shipped state (as of 2026-07-20 audit)
 
 - Single commit (`717e5f3`, "Initial commit: Swift SDK for pdftract v1.1.0"), `main` branch,
