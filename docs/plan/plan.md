@@ -118,19 +118,39 @@ GitHub undetected exactly as this one did.
   non-generated file, and is trivially removable in one PR once upstream is fixed.
 - Cost: this repo needs a Swift-capable build image for Argo Workflows, which doesn't exist in
   the current template set yet and has to be created.
-- Debt: until upstream is fixed, there are two names per method (generated PascalCase +
-  hand-written lowerCamelCase forwarding shim) — must be tracked so it doesn't get forgotten.
-  Docs should only ever show the lowerCamelCase form.
-- Until this ships, `swift build --build-tests` fails on `main` today — see the P0 beads filed
-  against this ADR.
+- Debt (resolved 2026-07-22): the two-names-per-method shim is gone — upstream codegen emits
+  lowerCamelCase directly (d7009cb). Docs still only ever show the lowerCamelCase form.
+- `swift build --build-tests` passes on `main` as of 2026-09-24 (it failed before ADR-1's
+  fixes); the CI gate keeps it that way on every push.
 
 ### Follow-up work (beads filed 2026-07-20, label `artifact-improvement`)
 
-- Add the lowerCamelCase compatibility shim (point 3 above) — P0, unblocks everything else.
-- Add the Argo Workflows CI template (point 1 above) — P0.
-- Push the `v1.1.0` tag once CI is green (point 2 above) — P1, depends on the previous two.
-- File the upstream codegen-template fix against `jedarden/pdftract` (point 4 above) — P2,
-  cross-repo, tracked here since the defect was found here.
+Status update 2026-09-24 (bf-25c): every item below is resolved except the tag push.
+
+- ~~Add the lowerCamelCase compatibility shim (point 3 above) — P0~~ — SHIPPED (6e19810),
+  then deleted per point 4 once the upstream fix landed (d7009cb, 2026-07-22): the generated
+  API is lowerCamelCase directly now.
+- ~~Add the Argo Workflows CI template (point 1 above) — P0~~ — **SHIPPED + VERIFIED**
+  (bf-3vc ready to close). `pdftract-swift-build` lives in declarative-config
+  `k8s/iad-ci/argo-workflows/` (ArgoCD-synced) and a sensor auto-triggers it on every push
+  to main (bf-57b). Verified 2026-09-24 (bf-25c):
+  - Reliability: green on 3 consecutive runs (`4b79w` auto-triggered + `q9q72`/`85c2t`
+    manual), pod runtimes ~3–8 min against the 1800 s step deadline even while iad-ci is
+    under load — no resource/deadline hardening needed; loosening them would only mask
+    infra flakes rather than catch regressions.
+  - Correctness (the gate has teeth, not a no-op green): on a throwaway branch, reverting
+    the lowerCamelCase API surface — renaming the 9 generated methods back to the PascalCase
+    the pre-fix generator emitted, the same defect class the deleted shim used to paper
+    over — makes `swift build --build-tests` exit 1 with `value of type 'Pdftract' has no
+    member 'extractMarkdown'` (likewise extract, extractText, extractStream, search,
+    getMetadata, hash, classify, verifyReceipt): the test target fails to compile, exactly
+    the failure class that shipped undetected before CI existed. Branch discarded; main
+    untouched.
+- Push the `v1.1.0` tag once CI is green (point 2 above) — P1. CI is green now; pushing the
+  tag is the one remaining open item from this ADR.
+- ~~File the upstream codegen-template fix against `jedarden/pdftract` (point 4 above) —
+  P2~~ — SHIPPED upstream (pdftract 54b432f8 registers the `lc_first` filter); this repo
+  regenerated and dropped the shim in d7009cb.
 
 ## Other improvement ideas considered (not the ADR — filed as beads instead)
 
