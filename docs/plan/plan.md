@@ -29,7 +29,11 @@ binary installed.
 - `.codegen-version` = `1.1.0`; `Sources/PdftractCodegen/*` and
   `Sources/Pdftract/Pdftract.swift` are marked auto-generated ("do not edit manually — use the
   code generator to refresh").
-- No git tags exist on this repo (checked both local and `origin` after `git fetch --tags`).
+- ~~No git tags exist on this repo (checked both local and `origin` after `git fetch --tags`).~~
+  Resolved 2026-09-24 (bf-4mw): `v1.1.0` annotated tag pushed to `origin` and confirmed on the
+  GitHub mirror, so the README's `from: "1.1.0"` SwiftPM requirement resolves. (A local-only
+  `needle-cleanup-backup-20260801` tag from a fleet cleanup also exists; it is not semver and
+  was never pushed.)
 - `origin` remote is `https://github.com/jedarden/pdftract-swift.git` directly — this repo does
   not currently follow the workspace's Forgejo-primary / GitHub-mirror hosting convention (see
   follow-up beads under ADR-1 below).
@@ -125,7 +129,7 @@ GitHub undetected exactly as this one did.
 
 ### Follow-up work (beads filed 2026-07-20, label `artifact-improvement`)
 
-Status update 2026-09-24 (bf-25c): every item below is resolved except the tag push.
+Status update 2026-09-24 (bf-4mw): every item below is resolved — the ADR is fully shipped.
 
 - ~~Add the lowerCamelCase compatibility shim (point 3 above) — P0~~ — SHIPPED (6e19810),
   then deleted per point 4 once the upstream fix landed (d7009cb, 2026-07-22): the generated
@@ -146,8 +150,13 @@ Status update 2026-09-24 (bf-25c): every item below is resolved except the tag p
     getMetadata, hash, classify, verifyReceipt): the test target fails to compile, exactly
     the failure class that shipped undetected before CI existed. Branch discarded; main
     untouched.
-- Push the `v1.1.0` tag once CI is green (point 2 above) — P1. CI is green now; pushing the
-  tag is the one remaining open item from this ADR.
+- ~~Push the `v1.1.0` tag once CI is green (point 2 above) — P1~~ — **SHIPPED + VERIFIED**
+  (bf-4mw, 2026-09-24). `v1.1.0` (annotated, → `01d83b0`) pushed to Forgejo `origin` and
+  confirmed on the GitHub mirror (the URL in the README's `from: "1.1.0"` requirement).
+  Tagged only after the gate was verified green on that exact commit: `pdftract-swift-build`
+  `manual-tn26m` Succeeded against main `01d83b0`, and the same gate re-run locally on a clean
+  `git archive HEAD` extraction (`swift build`, `swift build --build-tests`, and the filtered
+  fake-binary test suites) all exited 0.
 - ~~File the upstream codegen-template fix against `jedarden/pdftract` (point 4 above) —
   P2~~ — SHIPPED upstream (pdftract 54b432f8 registers the `lc_first` filter); this repo
   regenerated and dropped the shim in d7009cb.
