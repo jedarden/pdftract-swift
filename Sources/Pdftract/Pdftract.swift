@@ -32,6 +32,10 @@ public typealias PdftractError = PdftractCodegen.PdftractError
 // SDK-internal error (not CLI-exit-code-driven) for undecodable NDJSON stream lines.
 public typealias MalformedStreamError = PdftractCodegen.MalformedStreamError
 
+// Client-side lifecycle error (not CLI-exit-code-driven): the spawned process
+// outlived the caller-provided `timeout:` and was terminated.
+public typealias TimeoutError = PdftractCodegen.TimeoutError
+
 
 
 public typealias CorruptPdfError = PdftractCodegen.CorruptPdfError

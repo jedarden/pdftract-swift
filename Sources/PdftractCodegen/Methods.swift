@@ -51,10 +51,22 @@ public struct Pdftract {
     }()
 
     /// Executes the pdftract binary with the given arguments.
-    /// - Parameter args: Command-line arguments to pass.
+    /// - Parameters:
+    ///   - args: Command-line arguments to pass.
+    ///   - timeout: Maximum seconds to let the child run. On expiry the child
+    ///     is terminated (SIGTERM) and reaped, and `TimeoutError` is thrown.
+    ///     `nil` (the default) waits indefinitely.
     /// - Returns: The stdout output as a String.
-    /// - Throws: `PdftractError` if the process fails.
-    private func exec(_ args: [String]) async throws -> String {
+    /// - Throws: `PdftractError` if the process fails, `TimeoutError` when the
+    ///   deadline expires, `CancellationError` if the surrounding Task is
+    ///   cancelled (the child is terminated and reaped either way).
+    private func exec(_ args: [String], timeout: TimeInterval? = nil) async throws -> String {
+        if let timeout {
+            guard timeout > 0, timeout.isFinite else {
+                throw TimeoutError("timeout must be a finite number of seconds > 0, got \(timeout)", -1)
+            }
+        }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath)
 
@@ -64,31 +76,86 @@ public struct Pdftract {
         process.standardError = errPipe
         process.arguments = args
 
+        let spawned = SpawnedProcess()
+
         do {
-            try process.run()
+            return try await withTaskCancellationHandler {
+                guard !Task.isCancelled else { throw CancellationError() }
 
-            // Drain stdout/stderr concurrently while the process runs.
-            // Reading them only after waitUntilExit() deadlocks on large
-            // output: once the OS pipe buffer (~64KB on Linux) fills, the
-            // child blocks on write() while we block waiting for it to exit.
-            // Mirrors the streaming methods' concurrent reads.
-            let stdoutTask = Task { outPipe.fileHandleForReading.readDataToEndOfFile() }
-            let stderrTask = Task { errPipe.fileHandleForReading.readDataToEndOfFile() }
+                try process.run()
+                spawned.didLaunch(process)
 
-            process.waitUntilExit()
+                // A cancellation that landed between handler registration and
+                // launch was a launch-safe no-op inside the handler. Honor it
+                // now so a cancelled caller never leaves the child running.
+                if spawned.isStopRequested() {
+                    spawned.terminate()
+                }
 
-            let outData = await stdoutTask.value
-            let errData = await stderrTask.value
+                // Deadline watchdog: sleeps out the budget, then terminates the
+                // child — which is exactly what unblocks the reap below. It is
+                // cancelled with the run, so a child that finishes in time
+                // never pays for the timer. Clamped to what UInt64 nanoseconds
+                // can express; anything past ~292 years is "forever" anyway.
+                let timeoutTask: Task<Void, Never>? = timeout.map { deadline in
+                    Task {
+                        let clamped = min(deadline, Double(Int64.max) / 1_000_000_000)
+                        try? await Task.sleep(nanoseconds: UInt64(clamped * 1_000_000_000))
+                        guard !Task.isCancelled else { return }
+                        spawned.deadlineFired()
+                    }
+                }
+                defer { timeoutTask?.cancel() }
 
-            let output = String(data: outData, encoding: .utf8) ?? ""
-            let stderr = String(data: errData, encoding: .utf8) ?? ""
+                // Drain stdout/stderr concurrently while the process runs.
+                // Reading them only after waitUntilExit() deadlocks on large
+                // output: once the OS pipe buffer (~64KB on Linux) fills, the
+                // child blocks on write() while we block waiting for it to
+                // exit. Mirrors the streaming methods' concurrent reads. On
+                // the cancellation/timeout paths the terminated child's death
+                // EOFs both drains, so awaiting them cannot block.
+                let stdoutTask = Task { outPipe.fileHandleForReading.readDataToEndOfFile() }
+                let stderrTask = Task { errPipe.fileHandleForReading.readDataToEndOfFile() }
 
-            guard process.terminationStatus == 0 else {
-                throw mapError(stderr, Int(process.terminationStatus))
+                // Blocks only until the child exits — naturally, or promptly
+                // once cancellation/timeout has terminated it — and reaps the
+                // child exactly once.
+                spawned.reap()
+
+                let outData = await stdoutTask.value
+                let errData = await stderrTask.value
+
+                // Order matters: a cancelled or timed-out run was killed by
+                // this SDK, so its nonzero exit status is the kill signal, not
+                // a CLI error to map.
+                guard !Task.isCancelled else {
+                    throw CancellationError()
+                }
+                if spawned.isTimedOut() {
+                    throw TimeoutError(
+                        "pdftract did not finish within \(timeout ?? 0) seconds and was terminated",
+                        -1
+                    )
+                }
+
+                let output = String(data: outData, encoding: .utf8) ?? ""
+                let stderr = String(data: errData, encoding: .utf8) ?? ""
+
+                guard process.terminationStatus == 0 else {
+                    throw mapError(stderr, Int(process.terminationStatus))
+                }
+
+                return output
+            } onCancel: {
+                // Launch-safe: SIGTERMs the child if (and only if) it is live.
+                // Reaping happens on the operation path, which the kill
+                // unblocks; a cancelled call still runs to its throw, so no
+                // zombie is left behind.
+                spawned.terminate()
             }
-
-            return output
         } catch let error as PdftractError {
+            throw error
+        } catch let error as CancellationError {
             throw error
         } catch {
             throw PdftractError("Failed to execute pdftract: \(error.localizedDescription)", -1)
@@ -144,11 +211,17 @@ public struct Pdftract {
     /// - Parameters:
     ///   - source: The PDF source (path, URL, or bytes).
     ///   - options: Extraction options.
+    ///   - timeout: Maximum seconds to let the pdftract process run before it
+    ///     is terminated and reaped and `TimeoutError` is thrown. `nil` (the
+    ///     default) waits indefinitely. Cancelling the surrounding Task has
+    ///     the same effect at any time.
     /// - Returns: The complete document structure.
-    /// - Throws: `PdftractError` if extraction fails.
+    /// - Throws: `PdftractError` if extraction fails, `TimeoutError` on
+    ///   deadline expiry, `CancellationError` if the Task is cancelled.
     public func extract(
         _ source: Source,
-        options: ExtractOptions = ExtractOptions()
+        options: ExtractOptions = ExtractOptions(),
+        timeout: TimeInterval? = nil
     ) async throws -> Document {
         var args = ["extract", "--json"]
         let prepared = try source.toArgs()
@@ -156,7 +229,7 @@ public struct Pdftract {
         args.append(contentsOf: prepared.arguments)
         args.append(contentsOf: options.toArgs())
 
-        let output = try await exec(args)
+        let output = try await exec(args, timeout: timeout)
 
         guard let data = output.data(using: .utf8) else {
             throw PdftractError("Failed to decode output", -1)
@@ -174,11 +247,17 @@ public struct Pdftract {
     /// - Parameters:
     ///   - source: The PDF source (path, URL, or bytes).
     ///   - options: Extraction options.
+    ///   - timeout: Maximum seconds to let the pdftract process run before it
+    ///     is terminated and reaped and `TimeoutError` is thrown. `nil` (the
+    ///     default) waits indefinitely. Cancelling the surrounding Task has
+    ///     the same effect at any time.
     /// - Returns: The extracted text.
-    /// - Throws: `PdftractError` if extraction fails.
+    /// - Throws: `PdftractError` if extraction fails, `TimeoutError` on
+    ///   deadline expiry, `CancellationError` if the Task is cancelled.
     public func extractText(
         _ source: Source,
-        options: ExtractOptions = ExtractOptions()
+        options: ExtractOptions = ExtractOptions(),
+        timeout: TimeInterval? = nil
     ) async throws -> String {
         var args = ["extract"]
         let prepared = try source.toArgs()
@@ -190,7 +269,7 @@ public struct Pdftract {
         
         args.append("--json")
 
-        let output = try await exec(args)
+        let output = try await exec(args, timeout: timeout)
 
         // Parse JSON to verify it's valid, then extract the text field
         guard let data = output.data(using: .utf8),
@@ -213,11 +292,17 @@ public struct Pdftract {
     /// - Parameters:
     ///   - source: The PDF source (path, URL, or bytes).
     ///   - options: Extraction options.
+    ///   - timeout: Maximum seconds to let the pdftract process run before it
+    ///     is terminated and reaped and `TimeoutError` is thrown. `nil` (the
+    ///     default) waits indefinitely. Cancelling the surrounding Task has
+    ///     the same effect at any time.
     /// - Returns: The extracted text.
-    /// - Throws: `PdftractError` if extraction fails.
+    /// - Throws: `PdftractError` if extraction fails, `TimeoutError` on
+    ///   deadline expiry, `CancellationError` if the Task is cancelled.
     public func extractMarkdown(
         _ source: Source,
-        options: ExtractOptions = ExtractOptions()
+        options: ExtractOptions = ExtractOptions(),
+        timeout: TimeInterval? = nil
     ) async throws -> String {
         var args = ["extract"]
         let prepared = try source.toArgs()
@@ -229,7 +314,7 @@ public struct Pdftract {
         
         args.append("--json")
 
-        let output = try await exec(args)
+        let output = try await exec(args, timeout: timeout)
 
         // Parse JSON to verify it's valid, then extract the text field
         guard let data = output.data(using: .utf8),
@@ -286,14 +371,39 @@ public struct Pdftract {
                 process.standardError = errPipe
                 process.arguments = args
 
-                // Handle cancellation
+                // Lifecycle: a dropped or cancelled sequence must terminate
+                // (SIGTERM) and reap the child. onTermination fires for every
+                // ending — cancellation, break-out-of-the-loop, or normal
+                // completion — and can fire before the spawn below even runs
+                // (the producer lives in this unstructured Task) or after the
+                // child already exited on its own. terminate() is launch-safe
+                // and reap() idempotent, so this is correct in every
+                // interleaving; the old unconditional
+                // terminate()/waitUntilExit() pair trapped in both of those
+                // races.
+                let spawned = SpawnedProcess()
                 continuation.onTermination = { @Sendable _ in
-                    process.terminate()
-                    _ = try? process.waitUntilExit()
+                    spawned.terminate()
+                    spawned.reap()
                 }
 
                 do {
+                    // The sequence may have been dropped before this task got
+                    // to run. Never launch a child for a sequence that is
+                    // already gone — that is the "dropped call leaves an
+                    // orphaned pdftract process" failure mode.
+                    guard !spawned.isStopRequested() else { return }
+
                     try process.run()
+                    spawned.didLaunch(process)
+
+                    // A termination that landed between registration and the
+                    // launch was a launch-safe no-op above. Honor it now
+                    // instead of streaming a dead sequence's child to
+                    // completion.
+                    if spawned.isStopRequested() {
+                        spawned.terminate()
+                    }
 
                     let outHandle = outPipe.fileHandleForReading
 
@@ -308,7 +418,10 @@ public struct Pdftract {
                     // Read lines incrementally. Loop to EOF rather than while
                     // `process.isRunning`: a child that exits between two reads
                     // can still leave buffered stdout behind, and EOF is the
-                    // only signal that stdout is fully drained.
+                    // only signal that stdout is fully drained. When the
+                    // sequence is dropped, onTermination's terminate() EOFs
+                    // this read — the drop cannot leave the producer wedged on
+                    // a pipe that never closes.
                     var buffer = [UInt8]()
                     let readSize = 4096
 
@@ -352,7 +465,9 @@ public struct Pdftract {
                         }
                     }
 
-                    process.waitUntilExit()
+                    // Reaps the child exactly once; a no-op if onTermination
+                    // already reaped it after killing the child mid-read.
+                    spawned.reap()
 
                     // The child has exited, so the concurrent drain above has
                     // hit EOF and awaiting it cannot block. It must be complete
@@ -415,14 +530,39 @@ public struct Pdftract {
                 process.standardError = errPipe
                 process.arguments = args
 
-                // Handle cancellation
+                // Lifecycle: a dropped or cancelled sequence must terminate
+                // (SIGTERM) and reap the child. onTermination fires for every
+                // ending — cancellation, break-out-of-the-loop, or normal
+                // completion — and can fire before the spawn below even runs
+                // (the producer lives in this unstructured Task) or after the
+                // child already exited on its own. terminate() is launch-safe
+                // and reap() idempotent, so this is correct in every
+                // interleaving; the old unconditional
+                // terminate()/waitUntilExit() pair trapped in both of those
+                // races.
+                let spawned = SpawnedProcess()
                 continuation.onTermination = { @Sendable _ in
-                    process.terminate()
-                    _ = try? process.waitUntilExit()
+                    spawned.terminate()
+                    spawned.reap()
                 }
 
                 do {
+                    // The sequence may have been dropped before this task got
+                    // to run. Never launch a child for a sequence that is
+                    // already gone — that is the "dropped call leaves an
+                    // orphaned pdftract process" failure mode.
+                    guard !spawned.isStopRequested() else { return }
+
                     try process.run()
+                    spawned.didLaunch(process)
+
+                    // A termination that landed between registration and the
+                    // launch was a launch-safe no-op above. Honor it now
+                    // instead of streaming a dead sequence's child to
+                    // completion.
+                    if spawned.isStopRequested() {
+                        spawned.terminate()
+                    }
 
                     let outHandle = outPipe.fileHandleForReading
 
@@ -437,7 +577,10 @@ public struct Pdftract {
                     // Read lines incrementally. Loop to EOF rather than while
                     // `process.isRunning`: a child that exits between two reads
                     // can still leave buffered stdout behind, and EOF is the
-                    // only signal that stdout is fully drained.
+                    // only signal that stdout is fully drained. When the
+                    // sequence is dropped, onTermination's terminate() EOFs
+                    // this read — the drop cannot leave the producer wedged on
+                    // a pipe that never closes.
                     var buffer = [UInt8]()
                     let readSize = 4096
 
@@ -481,7 +624,9 @@ public struct Pdftract {
                         }
                     }
 
-                    process.waitUntilExit()
+                    // Reaps the child exactly once; a no-op if onTermination
+                    // already reaped it after killing the child mid-read.
+                    spawned.reap()
 
                     // The child has exited, so the concurrent drain above has
                     // hit EOF and awaiting it cannot block. It must be complete
@@ -514,12 +659,18 @@ public struct Pdftract {
     ///   - options: Base options.
     /// - Returns: The document metadata.
     
-    /// - Throws: `PdftractError` if operation fails.
+    ///   - timeout: Maximum seconds to let the pdftract process run before it
+    ///     is terminated and reaped and `TimeoutError` is thrown. `nil` (the
+    ///     default) waits indefinitely. Cancelling the surrounding Task has
+    ///     the same effect at any time.
+    /// - Throws: `PdftractError` if operation fails, `TimeoutError` on
+    ///   deadline expiry, `CancellationError` if the Task is cancelled.
     public func getMetadata(
         _ source: Source
         
         , options: BaseOptions = BaseOptions()
         
+        , timeout: TimeInterval? = nil
     ) async throws -> Metadata {
         var args = [
         
@@ -533,7 +684,7 @@ public struct Pdftract {
         args.append(contentsOf: options.toArgs())
         
 
-        let output = try await exec(args)
+        let output = try await exec(args, timeout: timeout)
 
         guard let data = output.data(using: .utf8) else {
             throw PdftractError("Failed to decode output", -1)
@@ -554,12 +705,18 @@ public struct Pdftract {
     ///   - options: Hash options.
     /// - Returns: The document fingerprint.
     
-    /// - Throws: `PdftractError` if operation fails.
+    ///   - timeout: Maximum seconds to let the pdftract process run before it
+    ///     is terminated and reaped and `TimeoutError` is thrown. `nil` (the
+    ///     default) waits indefinitely. Cancelling the surrounding Task has
+    ///     the same effect at any time.
+    /// - Throws: `PdftractError` if operation fails, `TimeoutError` on
+    ///   deadline expiry, `CancellationError` if the Task is cancelled.
     public func hash(
         _ source: Source
         
         , options: HashOptions = HashOptions()
         
+        , timeout: TimeInterval? = nil
     ) async throws -> Fingerprint {
         var args = [
         
@@ -573,7 +730,7 @@ public struct Pdftract {
         args.append(contentsOf: options.toArgs())
         
 
-        let output = try await exec(args)
+        let output = try await exec(args, timeout: timeout)
 
         guard let data = output.data(using: .utf8) else {
             throw PdftractError("Failed to decode output", -1)
@@ -593,10 +750,16 @@ public struct Pdftract {
     ///   - source: The PDF source (path, URL, or bytes).
     /// - Returns: The classification result.
     
-    /// - Throws: `PdftractError` if operation fails.
+    ///   - timeout: Maximum seconds to let the pdftract process run before it
+    ///     is terminated and reaped and `TimeoutError` is thrown. `nil` (the
+    ///     default) waits indefinitely. Cancelling the surrounding Task has
+    ///     the same effect at any time.
+    /// - Throws: `PdftractError` if operation fails, `TimeoutError` on
+    ///   deadline expiry, `CancellationError` if the Task is cancelled.
     public func classify(
         _ source: Source
         
+        , timeout: TimeInterval? = nil
     ) async throws -> Classification {
         var args = [
         
@@ -608,7 +771,7 @@ public struct Pdftract {
         args.append(contentsOf: prepared.arguments)
         
 
-        let output = try await exec(args)
+        let output = try await exec(args, timeout: timeout)
 
         guard let data = output.data(using: .utf8) else {
             throw PdftractError("Failed to decode output", -1)
@@ -624,11 +787,17 @@ public struct Pdftract {
     /// - Parameters:
     ///   - path: Path to the PDF file.
     ///   - receipt: The receipt data to verify.
+    ///   - timeout: Maximum seconds to let the pdftract process run before it
+    ///     is terminated and reaped and `TimeoutError` is thrown. `nil` (the
+    ///     default) waits indefinitely. Cancelling the surrounding Task has
+    ///     the same effect at any time.
     /// - Returns: A `ReceiptVerificationResult`. Its `valid` property is `true` when the
     ///   receipt matches; when invalid, `reason` describes which verification check failed.
-    /// - Throws: `PdftractError` if the CLI invocation itself fails (not a receipt validation failure).
-    public func verifyReceipt(_ path: String, receipt: Receipt) async throws -> ReceiptVerificationResult {
-        let output = try await exec(["verify-receipt", path, receipt.data, "--json"])
+    /// - Throws: `PdftractError` if the CLI invocation itself fails (not a receipt
+    ///   validation failure), `TimeoutError` on deadline expiry,
+    ///   `CancellationError` if the Task is cancelled.
+    public func verifyReceipt(_ path: String, receipt: Receipt, timeout: TimeInterval? = nil) async throws -> ReceiptVerificationResult {
+        let output = try await exec(["verify-receipt", path, receipt.data, "--json"], timeout: timeout)
 
         guard let data = output.data(using: .utf8) else {
             throw PdftractError("Failed to decode output", -1)
@@ -639,4 +808,95 @@ public struct Pdftract {
 
     
     
+}
+
+/// Cancellation- and timeout-safe handle on a spawned `Process`.
+///
+/// `Foundation.Process` is hostile to asynchronous lifecycle control:
+/// `terminate()` traps when the child has not launched yet, `waitUntilExit()`
+/// traps before launch too, and a Task cancellation or a dropped stream can
+/// land at any instant — including between `run()` and cancellation-handler
+/// registration, or after the child already exited on its own. Every
+/// lifecycle path (success, mapped CLI error, timeout, Task cancellation,
+/// dropped stream) therefore funnels through this wrapper, which makes both
+/// operations launch-safe and idempotent:
+///
+/// - `terminate()` only signals a child that is actually running, and
+///   remembers a stop that won the race against the launch so it is honored
+///   once the child exists.
+/// - `reap()` runs `waitUntilExit()` exactly once no matter how many callers
+///   race to clean up, so the child is never left a zombie.
+/// - `deadlineFired()` records whether the timeout genuinely interrupted a
+///   live child, so a child that beat its deadline still returns its
+///   (complete) output instead of a timeout error.
+private final class SpawnedProcess: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var stopRequested = false
+    private var reaped = false
+    private var timedOut = false
+
+    /// Marks the child as launched. Must be called immediately after
+    /// `Process.run()` succeeds; `terminate()` and `reap()` are no-ops before
+    /// this point.
+    func didLaunch(_ process: Process) {
+        lock.lock()
+        self.process = process
+        lock.unlock()
+    }
+
+    /// Whether any caller has asked for the child to be stopped.
+    func isStopRequested() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopRequested
+    }
+
+    /// Whether the timeout deadline interrupted a live child.
+    func isTimedOut() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return timedOut
+    }
+
+    /// SIGTERMs the child if it is live, and remembers the request so a stop
+    /// that races the launch is honored once the child exists. Safe to call
+    /// from any thread at any time — before launch, after exit, or
+    /// concurrently with itself. Reaping stays with `reap()`.
+    func terminate() {
+        lock.lock()
+        stopRequested = true
+        let process = self.process
+        lock.unlock()
+        guard let process, process.isRunning else { return }
+        process.terminate()
+    }
+
+    /// Records a fired timeout deadline: SIGTERMs the child if it is still
+    /// running and marks the run as timed out. A child that already exited
+    /// beat the deadline, so the flag stays clear and the normal path returns
+    /// its output rather than a timeout error.
+    func deadlineFired() {
+        lock.lock()
+        let process = self.process
+        lock.unlock()
+        guard let process, process.isRunning else { return }
+        lock.lock()
+        timedOut = true
+        lock.unlock()
+        process.terminate()
+    }
+
+    /// Reaps the child exactly once. A no-op when the child never launched or
+    /// was already reaped, so success, cancellation, timeout, and stream
+    /// termination can all call it without double-`waitUntilExit()`.
+    func reap() {
+        lock.lock()
+        let process = self.process
+        let alreadyReaped = reaped
+        reaped = true
+        lock.unlock()
+        guard let process, !alreadyReaped else { return }
+        process.waitUntilExit()
+    }
 }

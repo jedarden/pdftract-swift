@@ -135,3 +135,13 @@ public final class ReceiptVerifyError: PdftractError {}
 
 
 
+
+/// The pdftract process did not finish within the caller-provided `timeout:`
+/// and was terminated (SIGTERM) and reaped by the SDK.
+///
+/// This is a client-side failure, not a CLI exit code: the child was killed
+/// before it could report one, so `exitCode` is `-1`, like the SDK's other
+/// client-side errors. It is a `PdftractError` subclass so existing
+/// `catch let error as PdftractError` handlers keep working, while
+/// `catch let error as TimeoutError` lets timeout-aware callers retry.
+public final class TimeoutError: PdftractError {}

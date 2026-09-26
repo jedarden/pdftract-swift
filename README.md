@@ -15,7 +15,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/jedarden/pdftract-swift", from: "1.1.0")
+    .package(url: "https://github.com/jedarden/pdftract-swift", from: "1.2.0")
 ]
 ```
 
@@ -115,8 +115,8 @@ if let reason = result.reason {
 
 ## Binary version compatibility
 
-This SDK was generated against pdftract 1.1.0. Download that release from:
-https://github.com/jedarden/pdftract/releases/tag/v1.1.0
+This SDK was generated against pdftract 1.2.0. Download that release from:
+https://github.com/jedarden/pdftract/releases/tag/v1.2.0
 
 The SDK does **not** verify the binary version at runtime, so a mismatched binary
 may fail or return output that does not match this SDK's types. Make sure the
@@ -150,6 +150,70 @@ do {
 } catch let error as PdftractError {
     print("Error (code \(error.exitCode)): \(error.localizedDescription)")
 }
+```
+
+The exit-code table above covers failures the CLI itself reports. Two
+lifecycle errors come from the SDK instead (see the next section):
+
+| Error | Exit Code | Description |
+|-------|-----------|-------------|
+| `TimeoutError` | -1 | The process outlived the caller-provided `timeout:` and was terminated |
+| `CancellationError` | — | The surrounding Swift `Task` was cancelled; the process was terminated |
+
+## Cancellation and timeouts
+
+Every SDK call spawns a `pdftract` child process. The SDK owns that child's
+lifecycle end to end:
+
+**Cancellation.** Cancelling the Swift `Task` around a call terminates the
+child (SIGTERM) and reaps it — no orphaned `pdftract` process is left behind —
+and the call throws `CancellationError`:
+
+```swift
+let task = Task { try await client.extract(.path("huge.pdf")) }
+// ...caller changes their mind...
+task.cancel()
+try await task.value // throws CancellationError; the child is already gone
+```
+
+**Dropping a stream.** `extractStream` and `search` follow the same rule.
+Breaking out of the loop — or dropping the sequence without iterating it —
+terminates and reaps the child promptly. A sequence dropped before the child
+has even launched never spawns one:
+
+```swift
+for try await page in client.extractStream(.path("huge.pdf")) {
+    if page.pageIndex > 10 { break } // child terminated and reaped here
+}
+```
+
+**Timeouts.** The buffered methods (`extract`, `extractText`, `extractMarkdown`,
+`getMetadata`, `hash`, `classify`, `verifyReceipt`) take an optional
+`timeout:` in seconds. On expiry the child is terminated and reaped and the
+call throws `TimeoutError`:
+
+```swift
+let doc = try await client.extract(.path("huge.pdf"), timeout: 30)
+```
+
+`timeout:` bounds the whole invocation from the caller's side. It is
+independent of the CLI-level `--timeout` flag carried by
+`BaseOptions`/`SearchOptions`: the flag is enforced inside the binary, while
+the `timeout:` parameter is enforced by the SDK and works even if the binary
+ignores its own flag or hangs. A non-positive or non-finite `timeout:` throws
+`TimeoutError` without spawning anything.
+
+For a deadline on a *stream*, run the loop in its own `Task` and cancel it —
+the cancellation propagates to the child exactly as above:
+
+```swift
+let task = Task {
+    for try await page in client.extractStream(.path("huge.pdf")) {
+        print(page.pageIndex)
+    }
+}
+try await Task.sleep(for: .seconds(30))
+task.cancel() // child terminated and reaped if still running
 ```
 
 ## Options

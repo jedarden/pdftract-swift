@@ -430,3 +430,305 @@ final class StreamingStderrRegressionTests: XCTestCase {
         XCTAssertEqual(encryptionError.exitCode, 3)
     }
 }
+
+/// Regression tests for Task-cancellation and timeout lifecycle semantics.
+///
+/// Contract (README "Cancellation and timeouts"): cancelling the Task around
+/// a buffered call, expiring `timeout:`, or dropping a stream must terminate
+/// (SIGTERM) *and reap* the spawned pdftract child — never leave an orphaned
+/// process, an unreaped zombie, or a caller wedged on a pipe that never
+/// closes. A sequence dropped before the child even launches must not spawn
+/// one at all, and must not trip `Process.terminate()`'s not-launched trap.
+///
+/// Each test drives a fake `pdftract` that records its shell pid in a
+/// pidfile, prints any scripted stdout, then sleeps far past every deadline —
+/// so only the SDK's lifecycle machinery can end it. "Killed and reaped" is
+/// observable as `kill(pid, 0) != 0`: a live child answers the probe and so
+/// does a zombie (killed but never `waitUntilExit()`-ed) — only a reaped
+/// child leaves the process table entirely. Every wait is bounded by a
+/// watchdog so a revived defect fails an assertion instead of hanging the
+/// suite.
+final class ProcessLifecycleTests: XCTestCase {
+    /// Generous enough for a loaded CI box, short enough that a deadlock or
+    /// orphan fails fast instead of hanging the suite.
+    private static let watchdogSeconds: UInt64 = 10
+
+    /// Minimal valid `Document` JSON for a fake child to print.
+    private static let documentJSON =
+        #"{"schema_version":"1.0","pages":[{"page_index":0,"width":612.0,"height":792.0,"rotation":0,"spans":[],"blocks":[]}],"metadata":{"page_count":1}}"#
+
+    /// NDJSON `Page` line for a fake `extract --ndjson` child.
+    private static func pageJSON(index: Int) -> String {
+        "{\"page_index\":\(index),\"width\":612.0,\"height\":792.0,\"rotation\":0,\"spans\":[],\"blocks\":[]}"
+    }
+
+    /// NDJSON `Match` line for a fake `grep` child.
+    private static func matchJSON(page: Int) -> String {
+        "{\"text\":\"needle\",\"page\":\(page),\"bbox\":[0.0,0.0,10.0,10.0],\"context\":{\"before\":\"a\",\"after\":\"b\"}}"
+    }
+
+    private struct FakeBinary {
+        var directory: URL
+        var binaryPath: String
+        var pidPath: String
+    }
+
+    /// Writes an executable fake `pdftract` that records its shell pid in a
+    /// pidfile, prints `stdoutLines` on stdout, then sleeps `sleepSeconds` —
+    /// far past every deadline in this suite, so only the SDK's lifecycle
+    /// machinery (not natural exit) can end it. Ignores its arguments
+    /// entirely, so tests can pass any `Source`.
+    private static func writeFakeBinary(
+        stdoutLines: [String],
+        sleepSeconds: Int
+    ) throws -> FakeBinary {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdftract-lifecycle-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let binaryPath = directory.appendingPathComponent("pdftract").path
+        let pidPath = directory.appendingPathComponent("pid").path
+
+        var script = "#!/bin/sh\n"
+        script += "echo $$ > '\(pidPath)'\n"
+        for line in stdoutLines {
+            script += "echo '\(line)'\n"
+        }
+        script += "sleep \(sleepSeconds)\n"
+        script += "exit 0\n"
+
+        try script.write(toFile: binaryPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binaryPath)
+        return FakeBinary(directory: directory, binaryPath: binaryPath, pidPath: pidPath)
+    }
+
+    /// SIGKILLs any leftover fake child and removes the temp dir. Belt and
+    /// braces for failure paths: a test that fails mid-run must not leak a
+    /// sleeping child into later test cases.
+    private static func dispose(_ fake: FakeBinary) {
+        if let pid = readPid(from: fake.pidPath) {
+            kill(pid, SIGKILL)
+        }
+        try? FileManager.default.removeItem(at: fake.directory)
+    }
+
+    private static func readPid(from path: String) -> Int32? {
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8),
+              let pid = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return nil
+        }
+        return pid
+    }
+
+    /// A live child answers `kill(pid, 0)`; so does a zombie that was killed
+    /// but never reaped. Only a reaped child yields ESRCH.
+    private static func isProcessAlive(_ pid: Int32) -> Bool {
+        kill(pid, 0) == 0
+    }
+
+    /// Polls until the fake child's pidfile exists (the spawn happened), so a
+    /// regression that never spawns fails the test instead of hanging it.
+    private static func waitForSpawnedPid(_ pidPath: String) async throws -> Int32 {
+        let tickNanos: UInt64 = 50_000_000
+        let maxTicks = Int(watchdogSeconds) * 20
+        var ticks = 0
+        while true {
+            if let pid = readPid(from: pidPath) {
+                return pid
+            }
+            if ticks >= maxTicks {
+                XCTFail("fake child never spawned (no pidfile at \(pidPath))")
+                return -1
+            }
+            try await Task.sleep(nanoseconds: tickNanos)
+            ticks += 1
+        }
+    }
+
+    /// Fails unless the child left the process table within the deadline —
+    /// i.e. it was both terminated and reaped. A leaked orphan or an unreaped
+    /// zombie keeps answering `kill(pid, 0)` and trips this.
+    private static func assertReaped(_ pid: Int32) async throws {
+        let tickNanos: UInt64 = 50_000_000
+        let maxTicks = Int(watchdogSeconds) * 20
+        var ticks = 0
+        while isProcessAlive(pid) {
+            if ticks >= maxTicks {
+                XCTFail(
+                    "child \(pid) still in the process table after \(watchdogSeconds)s "
+                        + "— not terminated and reaped"
+                )
+                return
+            }
+            try await Task.sleep(nanoseconds: tickNanos)
+            ticks += 1
+        }
+    }
+
+    private struct CallOutcome {
+        var returned = false
+        var error: Error?
+    }
+
+    /// Handoff for the detached awaiter's outcome. An actor (not a locked
+    /// struct) so the polling loop can await it without blocking a
+    /// cooperative thread.
+    private actor OutcomeBox {
+        private var stored: CallOutcome?
+
+        func store(_ outcome: CallOutcome) {
+            guard stored == nil else { return }
+            stored = outcome
+        }
+
+        var outcome: CallOutcome? { stored }
+    }
+
+    /// Awaits `task` from a detached helper and polls for its completion, so
+    /// a regression that leaves the call blocked (the deadlock this suite
+    /// guards against) fails an assertion instead of wedging the run.
+    private static func awaitOutcome<Value>(
+        of task: Task<Value, Error>
+    ) async -> CallOutcome {
+        let box = OutcomeBox()
+        Task.detached {
+            var outcome = CallOutcome()
+            do {
+                _ = try await task.value
+            } catch {
+                outcome.error = error
+            }
+            outcome.returned = true
+            await box.store(outcome)
+        }
+
+        let tickNanos: UInt64 = 50_000_000
+        let maxTicks = Int(watchdogSeconds) * 20
+        var ticks = 0
+        while true {
+            if let outcome = await box.outcome {
+                return outcome
+            }
+            if ticks >= maxTicks {
+                return CallOutcome()
+            }
+            try? await Task.sleep(nanoseconds: tickNanos)
+            ticks += 1
+        }
+    }
+
+    func testCancelledExtractTerminatesAndReapsChild() async throws {
+        let fake = try Self.writeFakeBinary(stdoutLines: [], sleepSeconds: 60)
+        defer { Self.dispose(fake) }
+
+        let client = Pdftract(binaryPath: fake.binaryPath)
+        let task = Task { try await client.extract(.path("/does/not/matter.pdf")) }
+        let pid = try await Self.waitForSpawnedPid(fake.pidPath)
+
+        task.cancel()
+
+        // The cancelled call must return promptly with CancellationError —
+        // not ride out the child's full sleep.
+        let outcome = await Self.awaitOutcome(of: task)
+        guard outcome.returned else {
+            return XCTFail("cancelled extract never returned; cancellation did not reach the process")
+        }
+        XCTAssertTrue(
+            outcome.error is CancellationError,
+            "expected CancellationError, got \(String(describing: outcome.error))"
+        )
+
+        try await Self.assertReaped(pid)
+    }
+
+    func testTimedOutExtractThrowsTimeoutErrorAndReapsChild() async throws {
+        let fake = try Self.writeFakeBinary(stdoutLines: [], sleepSeconds: 60)
+        defer { Self.dispose(fake) }
+
+        let client = Pdftract(binaryPath: fake.binaryPath)
+        let task = Task { try await client.extract(.path("/does/not/matter.pdf"), timeout: 1.0) }
+        let pid = try await Self.waitForSpawnedPid(fake.pidPath)
+
+        let outcome = await Self.awaitOutcome(of: task)
+        guard outcome.returned else {
+            return XCTFail("timed-out extract never returned; the deadline did not reach the process")
+        }
+        XCTAssertTrue(
+            outcome.error is TimeoutError,
+            "expected TimeoutError, got \(String(describing: outcome.error))"
+        )
+
+        try await Self.assertReaped(pid)
+    }
+
+    /// Negative control for the timeout test: a child that finishes inside
+    /// the budget must be unaffected by it.
+    func testExtractInsideTimeoutCompletes() async throws {
+        let fake = try Self.writeFakeBinary(stdoutLines: [Self.documentJSON], sleepSeconds: 0)
+        defer { Self.dispose(fake) }
+
+        let client = Pdftract(binaryPath: fake.binaryPath)
+        let doc = try await client.extract(.path("/does/not/matter.pdf"), timeout: 30.0)
+
+        XCTAssertEqual(doc.pages.count, 1)
+    }
+
+    func testDroppedExtractStreamTerminatesAndReapsChild() async throws {
+        // One page, then the child holds stdout open and sleeps — the
+        // consumer drops the sequence while the child is still live.
+        let fake = try Self.writeFakeBinary(stdoutLines: [Self.pageJSON(index: 0)], sleepSeconds: 60)
+        defer { Self.dispose(fake) }
+
+        let client = Pdftract(binaryPath: fake.binaryPath)
+
+        var sawPage = false
+        for try await _ in client.extractStream(.path("/does/not/matter.pdf")) {
+            sawPage = true
+            break
+        }
+        XCTAssertTrue(sawPage, "fake child's first page never arrived")
+
+        let pid = try XCTUnwrap(Self.readPid(from: fake.pidPath), "fake child never spawned")
+        try await Self.assertReaped(pid)
+    }
+
+    func testDroppedSearchStreamTerminatesAndReapsChild() async throws {
+        let fake = try Self.writeFakeBinary(stdoutLines: [Self.matchJSON(page: 0)], sleepSeconds: 60)
+        defer { Self.dispose(fake) }
+
+        let client = Pdftract(binaryPath: fake.binaryPath)
+
+        var sawMatch = false
+        for try await _ in client.search(.path("/does/not/matter.pdf"), "needle") {
+            sawMatch = true
+            break
+        }
+        XCTAssertTrue(sawMatch, "fake child's first match never arrived")
+
+        let pid = try XCTUnwrap(Self.readPid(from: fake.pidPath), "fake child never spawned")
+        try await Self.assertReaped(pid)
+    }
+
+    /// A sequence dropped before its (unstructured) producer task ever runs
+    /// must not spawn a child at all — and must not trap in
+    /// `Process.terminate()`'s not-launched guard, which is exactly what the
+    /// old unconditional onTermination did here. No await sits between
+    /// creating and dropping the stream, so termination deterministically
+    /// wins the race against the launch.
+    func testExtractStreamDroppedBeforeIterationSpawnsNothing() async throws {
+        let fake = try Self.writeFakeBinary(stdoutLines: [], sleepSeconds: 60)
+        defer { Self.dispose(fake) }
+
+        let client = Pdftract(binaryPath: fake.binaryPath)
+
+        var stream: AsyncThrowingStream<Page, Error> = client.extractStream(.path("/does/not/matter.pdf"))
+        stream = nil
+
+        // Give any buggy late spawn ample time to show up.
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fake.pidPath),
+            "a stream dropped before iteration still spawned the pdftract child"
+        )
+    }
+}
