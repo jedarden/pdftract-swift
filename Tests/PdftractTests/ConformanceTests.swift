@@ -721,7 +721,10 @@ final class ProcessLifecycleTests: XCTestCase {
 
         let client = Pdftract(binaryPath: fake.binaryPath)
 
-        var stream: AsyncThrowingStream<Page, Error> = client.extractStream(.path("/does/not/matter.pdf"))
+        // Optional so the `= nil` below compiles: assigning nil is the drop,
+        // and it releases the sequence right here, deterministically before
+        // the sleep.
+        var stream: AsyncThrowingStream<Page, Error>? = client.extractStream(.path("/does/not/matter.pdf"))
         stream = nil
 
         // Give any buggy late spawn ample time to show up.
