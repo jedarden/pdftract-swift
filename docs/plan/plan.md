@@ -49,9 +49,15 @@ has since moved to Forgejo, with GitHub
 install snippet points consumers at. The regeneration also silently recreated
 ADR-1 defect #1 at the new version: the only semver tag was still `v1.1.0`, so
 the README's own `from: "1.2.0"` requirement resolved nowhere.
-pdfswift-55d2f9e8 is the fix — push the `v1.2.0` tag, realign these docs, and
-retarget pdfswift-3307a377's end-to-end binary verification from a v1.1.0
-binary to the v1.2.0 release.
+Resolved 2026-09-26 (pdfswift-55d2f9e8): `v1.2.0` (annotated, → `01a5b44`)
+pushed to Forgejo `origin` and mirror-confirmed on GitHub (`refs/tags/v1.2.0`
+via `ls-remote`), the URL the README's `from: "1.2.0"` requirement resolves
+against — tagged only after `pdftract-swift-build` went green on that exact
+commit (run `fnrbs`). pdfswift-3307a377's end-to-end binary verification is
+retargeted from a v1.1.0 binary to the 1.2.0 drop's binary, built from
+pdftract main `a2ed4c967`; upstream pdftract has not cut a v1.2.0 release tag
+yet (only `v0.1.0-test`), so the release-cascade `pdftract-swift-publish` run
+that exercises the real release binary can't fire until it does.
 
 ## ADR-1: 2026-07-20 — CI-gated build/release pipeline for the generated Swift SDK, plus an interim naming-compatibility shim
 
