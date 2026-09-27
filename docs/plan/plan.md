@@ -38,6 +38,21 @@ binary installed.
   not currently follow the workspace's Forgejo-primary / GitHub-mirror hosting convention (see
   follow-up beads under ADR-1 below).
 
+Status update 2026-09-26 (pdfswift-55d2f9e8): the snapshot above is one drop
+stale. The tree has been regenerated against pdftract 1.2.0 — f72f9a5
+(pdfswift-3bc489ab), then 84b1482 to pick up the drop-before-iteration
+lifecycle-test fix from pdftract a2ed4c967 — so `.codegen-version` = `1.2.0`,
+the README install snippet now reads `from: "1.2.0"`, and the generated API
+carries the timeout/cancellation support the `1.1.0` drop predated. `origin`
+has since moved to Forgejo, with GitHub
+(`https://github.com/jedarden/pdftract-swift`) as the mirror the README's
+install snippet points consumers at. The regeneration also silently recreated
+ADR-1 defect #1 at the new version: the only semver tag was still `v1.1.0`, so
+the README's own `from: "1.2.0"` requirement resolved nowhere.
+pdfswift-55d2f9e8 is the fix — push the `v1.2.0` tag, realign these docs, and
+retarget pdfswift-3307a377's end-to-end binary verification from a v1.1.0
+binary to the v1.2.0 release.
+
 ## ADR-1: 2026-07-20 — CI-gated build/release pipeline for the generated Swift SDK, plus an interim naming-compatibility shim
 
 ### Context

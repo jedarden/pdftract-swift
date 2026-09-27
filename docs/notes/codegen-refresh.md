@@ -7,7 +7,11 @@ generator" half of that instruction. This guide is **hand-written** and lives
 under `docs/notes/` precisely because it is not generator output and must
 survive every refresh.
 
-Last verified against pdftract main (`eeab77e7`) on 2026-09-23.
+Last verified against pdftract main (`a2ed4c967`) on 2026-09-26: a fresh
+`pdftract sdk codegen --lang swift --version 1.2.0` reproduces all nine
+generated paths in this repo byte-for-byte, and `sdk validate` reports no
+`MODIFIED`/`MISSING` under any generated path (only the usual README
+0.1.0-comparison artifact).
 
 ## Where the generated output comes from
 
@@ -81,7 +85,7 @@ Cargo version (`0.1.0`), which would stamp a wrong `.codegen-version`, a wrong
 
 ## `.codegen-version` moves in lockstep with the binary release
 
-`.codegen-version` (plain semver, no `v` prefix — currently `1.1.0`) records
+`.codegen-version` (plain semver, no `v` prefix — currently `1.2.0`) records
 which generator drop produced the checked-in tree. It is **pure provenance**:
 no runtime code reads it, and `sdk validate` does not compare it either
 (a deliberately mismatched file produces no finding — verified 2026-09-23).
@@ -141,12 +145,14 @@ Validate regenerates the skeleton into a temp dir and diffs it against
   by hand to separate that two-line artifact from real content drift.
 - **Staleness looks like tampering.** When pdftract main's templates are ahead
   of the last drop, validate reports `MODIFIED` on generated paths even though
-  nobody touched them. As of 2026-09-23, for example, the generator has
-  timeout/cancellation support (`exec(_:timeout:)`, `TimeoutError`,
-  README "Cancellation and timeouts") that the `1.1.0` drop predates — about
-  760 changed lines waiting for the next refresh. Check whether the diff is
-  pure template output (expected staleness) or a local edit (contract
-  violation) before deciding anything is wrong.
+  nobody touched them. (Worked example, now resolved: on 2026-09-23 the
+  generator's timeout/cancellation support — `exec(_:timeout:)`,
+  `TimeoutError`, README "Cancellation and timeouts" — was about 760 changed
+  lines ahead of the `1.1.0` drop. The 1.2.0 refresh landed all of it:
+  f72f9a5, then 84b1482 for the drop-before-iteration lifecycle-test fix from
+  pdftract a2ed4c967.) Check whether the diff is pure template output
+  (expected staleness) or a local edit (contract violation) before deciding
+  anything is wrong.
 
 ## Fixing a bug in generated code
 
