@@ -24,11 +24,13 @@
 // a page's contents — so each test throws XCTSkip when no pdftract binary can
 // be resolved on PATH: the guard pdfswift-8f868708 prescribes for
 // binary-dependent tests. Without the binary the suite skips cleanly and bare
-// `swift test` stays green; the CI gate keeps its fake-binary filter
-// (--filter 'StreamingStderrRegressionTests|ExitCodeMappingTests'), while the
-// publish gate's --filter ConformanceTests regex also matches this class name,
-// so a release-verification run (pdftract-swift-publish) exercises these for
-// real against the freshly built binary.
+// `swift test` stays green. Both CI gates skip this suite too: the build gate
+// filters it out (--filter 'StreamingStderrRegressionTests|ExitCodeMappingTests'),
+// and although the publish gate's --filter ConformanceTests regex matches this
+// class name, that workflow provisions no pdftract binary, so the guard fires
+// there as well. Running these for real needs a binary on PATH locally —
+// e.g. docker run swift:5.10-jammy over a clean extraction, with a pdftract
+// binary on PATH — the same standing as the other binary-gated suites.
 //
 // Fixtures are synthesized in-code: minimal, structurally valid PDFs (catalog,
 // page tree, one Helvetica text run per page, one shared font) written to the
