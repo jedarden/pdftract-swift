@@ -24,7 +24,9 @@ Routes (mode selected by URL path):
     /ctype/<TYPE>        fixture with arbitrary Content-Type TYPE
     /noranges.pdf        fixture without Accept-Ranges
     /nohead              HEAD -> 405, GET -> 200 fixture
-    /r/<N>               N-hop 302 chain ending at /ok.pdf
+    /r/<N>               N-hop 302 chain ending at /ok.pdf (exactly N
+                         redirects for any N >= 0; /r/0 serves the fixture
+                         directly with no redirect)
     /loop                infinite 302 redirect to itself
     /tlsredir            302 to absolute http:// URL (scheme downgrade)
     /slow/connect/<MS>   connect-delay knob: TCP accept is instant (kernel
@@ -160,7 +162,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, fixture_bytes())
         elif p.startswith("/r/"):
             n = int(p.rsplit("/", 1)[1])
-            loc = "/ok.pdf" if n <= 1 else "/r/%d" % (n - 1)
+            if n <= 0:
+                # zero-hop chain: land on the fixture with no redirect at
+                # all, so /r/N is exactly N redirects for every N >= 0
+                self._send(200, fixture_bytes(), extra={"Accept-Ranges": "bytes"})
+                return
+            loc = "/ok.pdf" if n == 1 else "/r/%d" % (n - 1)
             self._send(302, b"", ctype="text/plain", extra={"Location": loc})
         elif p == "/loop":
             self._send(302, b"", ctype="text/plain", extra={"Location": "/loop"})

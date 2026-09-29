@@ -67,23 +67,38 @@ body=$(curl -s "http://127.0.0.1:$HP/ok.pdf")
 [ "${body:0:8}" = "%PDF-1.4" ] && pass "HTTP happy path serves fixture" \
   || fail "HTTP happy path" "body head: ${body:0:20}"
 
-# 2. connect-delay knob (response start delayed by the knob)
-t=$(curl -s -o /dev/null -w '%{time_total}' "http://127.0.0.1:$HP/slow/connect/1200")
-awk "BEGIN{exit !($t >= 1.15)}" && pass "connect-delay knob /slow/connect/1200 took ${t}s" \
-  || fail "connect-delay knob" "time_total=$t expected >=1.15s"
+# 2. connect-delay knob: the TCP connect itself stays instant and the stall
+#    sits before the first response byte (ttfb carries the knob, conn does not)
+phases=$(curl -s -o /dev/null -w '%{time_connect} %{time_starttransfer} %{time_total}' \
+  "http://127.0.0.1:$HP/slow/connect/1200")
+conn=${phases%% *}; t=${phases##* }; ttfb=${phases#* }; ttfb=${ttfb% *}
+awk "BEGIN{exit !($conn < 0.5 && $ttfb >= 1.15)}" \
+  && pass "connect-delay knob: conn=${conn}s ttfb=${ttfb}s total=${t}s" \
+  || fail "connect-delay knob" "conn=$conn ttfb=$ttfb total=$t expected conn<0.5 ttfb>=1.15"
 
-# 3. body-delay knob (headers immediate, body delayed by the knob)
-t=$(curl -s -o /dev/null -w '%{time_total}' "http://127.0.0.1:$HP/slow/body/1200")
-awk "BEGIN{exit !($t >= 1.15)}" && pass "body-delay knob /slow/body/1200 took ${t}s" \
-  || fail "body-delay knob" "time_total=$t expected >=1.15s"
+# 3. body-delay knob: headers + first byte immediate (ttfb stays fast), the
+#    stall sits mid-body — the inverse phase split of check 2
+phases=$(curl -s -o /dev/null -w '%{time_starttransfer} %{time_total}' \
+  "http://127.0.0.1:$HP/slow/body/1200")
+ttfb=${phases%% *}; t=${phases##* }
+awk "BEGIN{exit !($ttfb < 0.5 && $t >= 1.15)}" \
+  && pass "body-delay knob: ttfb=${ttfb}s total=${t}s" \
+  || fail "body-delay knob" "ttfb=$ttfb total=$t expected ttfb<0.5 total>=1.15"
 
-# 4. redirect chain, configurable hop count
+# 4. redirect chain, configurable hop count: /r/N is exactly N redirects
+#    down to fixture bytes (including the zero-hop boundary /r/0)
+for n in 0 2 6; do
+  out=$(curl -sL -w '|%{num_redirects}' "http://127.0.0.1:$HP/r/$n")
+  hops=${out##*|}; body=${out%|*}
+  if [ "$hops" = "$n" ] && [ "${body:0:8}" = "%PDF-1.4" ]; then
+    pass "redirect /r/$n: exactly $n redirect(s) down to fixture bytes"
+  else
+    fail "redirect /r/$n" "num_redirects=$hops body=${body:0:20} expected $n + %PDF"
+  fi
+done
 loc=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "http://127.0.0.1:$HP/r/6")
 [ "$loc" = "302 http://127.0.0.1:$HP/r/5" ] && pass "redirect /r/6 -> 302 -> /r/5" \
   || fail "redirect /r/6" "got: $loc"
-body=$(curl -sL "http://127.0.0.1:$HP/r/6")
-[ "${body:0:8}" = "%PDF-1.4" ] && pass "redirect /r/6 followed to fixture" \
-  || fail "redirect /r/6 follow" "body head: ${body:0:20}"
 
 # 5. infinite redirect loop (curl exits 47 = CURLE_TOO_MANY_REDIRECTS; the
 #    reported http_code is the last 302, so the exit code is the signal)
