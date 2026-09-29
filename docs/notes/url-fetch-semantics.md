@@ -7,9 +7,11 @@ This file records the controlled-endpoint harness and the probe-target binary
 identity; the harness itself lives in `probes/`.
 
 No released pdftract build can perform a remote fetch today (see
-[Probe-target binary](#probe-target-binary)), so current probes stop at the
-feature gate. The harness below is verified end-to-end with curl and is ready
-for the moment a remote-enabled build exists.
+[Probe-target binary](#probe-target-binary)); the timeout measurements in
+[Timeouts](#timeouts-measured-remote-enabled-build) used a local
+`--features remote` build of the same v1.2.0 tag. The harness below is
+verified end-to-end with curl, and the `.url` probes against the
+remote-enabled build are recorded in that section.
 
 ## Probe harness
 
@@ -250,15 +252,222 @@ Re-verified 2026-09-29 against the live Forgejo release: v1.2.0 is still the
 only release (published 2026-09-29T07:04:42Z), the `SHA256SUMS` entry and the
 downloaded tarball both hash to the value above, the tarball's size matches
 the release asset byte count, and a fresh extraction of the tarball reproduces
-the binary sha256 exactly. The `.url` block at the feature gate stands: no
-`--features remote` build exists, released or local.
+the binary sha256 exactly. At that re-verification no `--features remote` build
+existed, released or local; one was produced later the same day (below).
 
-**Consequence for the probe children:** every `.url` probe currently
-deterministically exits 2 at the feature gate — no network I/O happens, so
-the harness's network misbehaviors cannot be observed through pdftract yet.
-The blocking prerequisite is a pdftract build with `--features remote`
-(either a new release or a local build). The harness above is the verified
-endpoint side of those probes; re-run
-`<binary> extract http://127.0.0.1:18765/<mode> --ndjson` against it once a
-remote-enabled binary exists, with the JSONL request logs as the
-client-behavior evidence.
+**Consequence for the probe children, resolved 2026-09-29:** the released
+binary still gates at exit 2, but a local v1.2.0 + `--features remote` build
+of the same tree was produced and the probes have been run against it —
+measured results in [Timeouts](#timeouts-measured-remote-enabled-build).
+
+## Timeouts (measured, remote-enabled build)
+
+Measured 2026-09-29 against a local remote-enabled build of the v1.2.0 tag
+(the released binary above still stops at the feature gate): `pdftract-remote`,
+`--version` `pdftract 0.1.0`, sha256
+`07f95264e59395a30ae622e42c7bd5f882583a20091a89c3ba665c9f16c48e0d`, scratch
+provenance `~/scratch/pdfswift-1d763709/probe-tmp/bin/` (raw captures
+`connect-probes.rerun.txt`, `read-probes.txt`, `connect-stderr/`,
+`read-stderr/` in the same scratch tree). Method for every probe:
+`timeout 90 pdftract-remote extract <url>` — the external cap exists so an
+unbounded client hang cannot wedge the probe — wall-clock via `date +%s%3N`,
+stderr captured verbatim, harness `probes/server.py` serving 127.0.0.1:18765
+(HTTP) and 127.0.0.1:18443 (TLS, self-signed) with a JSONL request log.
+
+**Verdict — plain HTTP:** the TCP connect gets a ~30 s deadline; everything
+after connect gets a ~10 s per-request deadline that surfaces cleanly as an
+error on the HEAD request; and that deadline does NOT bound the process — a
+ranged GET whose body takes ≥ ~10 s is re-issued forever with the error
+swallowed, so `extract` hangs with empty stderr until externally killed.
+There is no effective read/stall timeout.
+**HTTPS:** no timeout is observable — the self-signed-cert rejection ends the
+request in ~8 ms, before any connect or read phase.
+
+### Connect phase — HTTP
+
+TTFB/response stall above the deadline — `/slow/connect/15000` (TCP accept
+instant, server silent 15 s):
+
+```bash
+timeout 90 pdftract-remote extract http://127.0.0.1:18765/slow/connect/15000
+```
+
+Observed: wall 10328 ms, exit 1 — cut at ~10.3 s by the client, not by the
+server (its silence ran 15 s). Server log: `HEAD /slow/connect/15000` at
+t=…216.54 with no further request until t=…226.87, a 10.33 s gap matching the
+client-side abort. Attempt 1 of the same probe: 10314 ms — within noise.
+stderr (verbatim):
+
+```
+Error: Failed to open remote PDF source
+
+Caused by:
+    HEAD request failed: request timeout
+```
+
+Sub-timeout control — `/slow/connect/8000` (8 s stall):
+
+```bash
+timeout 90 pdftract-remote extract http://127.0.0.1:18765/slow/connect/8000
+```
+
+Observed: wall 16053 ms, exit 0, empty stderr — the client waited out the
+full 8 s stall and completed the ranged extract (server log: HEAD at
+t=…226.87 followed by its ranged GET at t=…234.87, exactly 8.00 s stall
+survived). Baseline `/ok.pdf`: 53 ms, exit 0. So no sub-8 s cutoff exists;
+the post-connect deadline sits between 8 s and 10.3 s, consistent with the
+~10 s mechanism below.
+
+### Connect phase — blackhole / SYN drop (HTTP)
+
+A true connect-phase hang needs no server; 10.255.255.1 drops SYN:
+
+```bash
+timeout 90 pdftract-remote extract http://10.255.255.1/ok.pdf
+```
+
+Observed: wall 30035 ms, exit 1 — cut by the client's own deadline, not the
+90 s cap (attempt 1: 30020 ms). stderr identical to the TTFB case above
+(`HEAD request failed: request timeout`). So the TCP-connect phase has a
+~30 s deadline: pdftract sets no connect-phase constant of its own (its
+30 s `READ_TIMEOUT_SECS` applies only to the non-range fallback path, see
+Mechanism), and the value matches ureq 2.12.1's built-in connect default
+(`timeout_connect: Some(Duration::from_secs(30))`, ureq `src/agent.rs:256`),
+which pdftract does not override.
+
+### Read / mid-body stall — HTTP
+
+`/slow/body/<MS>` sends headers + first body byte immediately, then stalls
+`<MS>` ms mid-body; HEAD is answered instantly, so the stall lands inside the
+ranged-GET body read. Above the deadline — `/slow/body/15000`:
+
+```bash
+timeout 90 pdftract-remote extract http://127.0.0.1:18765/slow/body/15000
+```
+
+Observed: wall 90004 ms, exit 124 — killed by the EXTERNAL 90 s cap, not by
+the client. **stderr: EMPTY — no error was ever surfaced.** Server log: HEAD
+answered instantly at t=…076.893, then the identical ranged GET
+(`Range: bytes=0-65535`) re-issued 8 times (nine requests logged) at
++10.13/+10.24 s spacing until the kill — a forever retry loop, ~10.2 s per
+attempt, no backoff, no escalation.
+
+Sub-deadline control — `/slow/body/5000`:
+
+```bash
+timeout 90 pdftract-remote extract http://127.0.0.1:18765/slow/body/5000
+```
+
+Observed: wall 5016 ms, exit 0, empty stderr, exactly one ranged GET (server
+log). Stalls under ~10 s of total request time succeed cleanly; ~10 s or
+above never complete.
+
+No-response variant — `/hang` (accepts the request, never responds; the
+server caps it at 120 s):
+
+```bash
+timeout 90 pdftract-remote extract http://127.0.0.1:18765/hang
+```
+
+Observed: wall 10243 ms, exit 1 — cut by the client's own ~10 s deadline, not
+the 90 s cap and not the 120 s server cap. stderr identical to the TTFB case
+above. Server log: exactly one HEAD, no retries — the HEAD-phase deadline
+surfaces cleanly as an error, unlike the body phase. Observed minimum hang
+duration for the no-response case: 10.2 s.
+
+### Idle-gap vs total-time semantics
+
+The post-connect deadline is TOTAL-TIME from request start, not idle-gap.
+Separator: a continuously-trickling body whose inter-byte gaps (100 ms) are
+far below any plausible idle threshold, but whose 20 s total exceeds the
+deadline.
+
+`/trickle/20` as planned is not runnable against this client — it answers
+200 without `Accept-Ranges`, and the client refuses instantly (no timeout
+measurable on that route):
+
+```bash
+timeout 90 pdftract-remote extract http://127.0.0.1:18765/trickle/20
+```
+
+Observed: wall 7 ms, exit 1. stderr (verbatim):
+
+```
+Error: Failed to download remote PDF
+
+Caused by:
+    Server does not support Range requests
+```
+
+Its purpose-built 206-capable twin, `/rangetrickle/20` (headers instantly,
+then 1 byte per 100 ms for 20 s total):
+
+```bash
+timeout 90 pdftract-remote extract http://127.0.0.1:18765/rangetrickle/20
+```
+
+Observed: wall 90003 ms, exit 124 (external cap), stderr EMPTY. Server log:
+the identical ranged GET re-issued 8 times at +10.00/+10.01 s spacing. A body
+trickling continuously at 100 ms/byte was still cut at 10.0 s per attempt; an
+idle-gap read timeout would have let the transfer complete at ~20 s. It never
+does ⇒ the deadline is total-time, not idle-based.
+
+### TLS — connect and read phases
+
+TLS unusable with self-signed; timeout not observable. The binary trusts only
+its compiled-in webpki-roots (ureq 2.12.1 / rustls 0.23.40; no
+rustls-native-certs / native-tls in the lockfile), so `SSL_CERT_FILE` /
+`SSL_CERT_DIR` are inert and the handshake fails before any phase whose
+timeout could be measured — the read-stall phase over TLS is unreachable, not
+merely unmeasured. The 18443 listener itself is healthy (`s_client` completes
+with Verify return code 18).
+
+```bash
+timeout 90 pdftract-remote extract https://127.0.0.1:18443/slow/connect/15000
+timeout 90 pdftract-remote extract https://127.0.0.1:18443/slow/body/15000
+timeout 90 pdftract-remote extract https://127.0.0.1:18443/ok.pdf
+```
+
+Observed: wall 7 / 7 / 8–9 ms respectively, exit 1 in every case — including
+the happy path. stderr identical in all three (verbatim):
+
+```
+Error: Failed to open remote PDF source
+
+Caused by:
+    HEAD request failed: connection interrupted
+```
+
+Cert rejection precedes any connect-phase stall, so no HTTPS timeout value is
+derivable on this harness; the HTTP and HTTPS columns are not comparable
+here.
+
+### Mechanism (source-corroborated, v1.2.0 tree)
+
+- `crates/pdftract-core/src/source/http_range.rs:26`
+  `const CONNECT_TIMEOUT_SECS: u64 = 10` — misnamed: it is the overall
+  per-request deadline, applied at `:132` as `ureq::AgentBuilder::timeout`
+  on the agent used for BOTH the HEAD and every ranged GET. ureq 2.12.1's
+  agent-wide timeout runs from request start through body read ⇒ the measured
+  total-time semantics.
+- ureq 2.12.1's un-overridden `timeout_connect` default is 30 s
+  (`src/agent.rs:256`) — the observed ~30 s blackhole cut.
+- `fetch_range` (`http_range.rs:297`) maps a body-read failure to
+  `io::ErrorKind::Interrupted`; `read_range`/`read`/`prefetch` contain no
+  retry loop, so the endless identical GETs are the std `Interrupted`-retry
+  idiom (`Read::read_exact` et al. retry on `ErrorKind::Interrupted`)
+  colliding with the per-request deadline: unbounded, no backoff, and the
+  error is swallowed entirely (empty stderr at kill).
+- `READ_TIMEOUT_SECS = 30` (`http_range.rs:29`) is the NON-range fallback
+  full-download path (`download_to_temp_and_mmap_with_hook`, `:722`), not the
+  ranged path.
+
+**Defect statement:** any origin whose ranged-GET body takes longer than
+~10 s total — a stalled server OR a legitimately slow/large transfer — hangs
+`pdftract extract` indefinitely (unbounded retry loop, empty stderr; killed
+externally at the 90 s probe cap after eight identical re-issues). The
+HEAD/TTFB phase by contrast errors out cleanly at ~10 s (`HEAD request
+failed: request timeout`), and the TCP-connect phase at ~30 s. Suggested fix
+shape (future work): map body-read timeout to a non-`Interrupted` error kind
+or add a bounded retry with escalation, and consider separating a true
+idle/read timeout from the overall request deadline.
