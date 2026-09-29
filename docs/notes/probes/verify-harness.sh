@@ -153,15 +153,39 @@ grep -q '"type": "connect"' "$WORK/proxy.jsonl" && grep -q "127.0.0.1:$TLS_SS" "
   && pass "proxy logged the CONNECT target" \
   || fail "proxy CONNECT log" "no connect entry in proxy.jsonl"
 
-# 11. oversized response, configurable size
-size=$(curl -s "http://127.0.0.1:$HP/big/2" | wc -c)
-[ "$size" -ge $((2 * 1024 * 1024)) ] && pass "oversized /big/2 served $size bytes" \
-  || fail "oversized /big/2" "size=$size expected >=2097152"
+# 11. oversized response, configurable size. The script has no pipefail, so
+#    curl's exit code is read directly (-f -o file; no pipe to hide it): a
+#    truncated or aborted transfer must fail even when the bytes that did
+#    arrive clear the size bar. Two knob values prove the size is actually
+#    configurable rather than a fixed pad, and head/tail confirm the body is
+#    still the documented valid padded PDF.
+curl -sf -o "$WORK/big2.pdf" "http://127.0.0.1:$HP/big/2"; rc=$?
+size2=$(wc -c < "$WORK/big2.pdf")
+curl -sf -o "$WORK/big4.pdf" "http://127.0.0.1:$HP/big/4"; rc4=$?
+size4=$(wc -c < "$WORK/big4.pdf")
+if [ "$rc" -eq 0 ] && [ "$rc4" -eq 0 ] \
+   && [ "$size2" -ge $((2 * 1024 * 1024)) ] && [ "$size4" -ge $((4 * 1024 * 1024)) ] \
+   && [ "$size4" -gt "$size2" ] \
+   && [ "$(head -c 8 "$WORK/big2.pdf")" = "%PDF-1.4" ] \
+   && [ "$(tail -c 6 "$WORK/big4.pdf")" = "%%EOF" ]; then
+  pass "oversized responses: /big/2 served $size2 bytes, /big/4 served $size4 bytes, both valid PDFs"
+else
+  fail "oversized responses" \
+    "rc=$rc/$rc4 size2=$size2 size4=$size4 head=$(head -c 8 "$WORK/big2.pdf" 2>/dev/null) tail=$(tail -c 6 "$WORK/big4.pdf" 2>/dev/null | od -c | head -1)"
+fi
 
-# 12. configurable content type
-ct=$(curl -sI "http://127.0.0.1:$HP/ctype/application-weird+proto" | grep -i '^content-type' | tr -d '\r')
-[ "$ct" = "Content-Type: application-weird+proto" ] && pass "configurable content type: $ct" \
-  || fail "configurable content type" "got: '$ct'"
+# 12. configurable content type: exercised with GET (the method the .url
+#    probes send) and two arbitrary values, including a slash subtype, each
+#    served with fixture bytes
+out=$(curl -s -w '|%{content_type}' "http://127.0.0.1:$HP/ctype/application-weird+proto")
+ct=${out##*|}; body=${out%|*}
+ct2=$(curl -s -o /dev/null -w '%{content_type}' "http://127.0.0.1:$HP/ctype/text/x-probe+weird")
+if [ "$ct" = "application-weird+proto" ] && [ "$ct2" = "text/x-probe+weird" ] \
+   && [ "${body:0:8}" = "%PDF-1.4" ]; then
+  pass "configurable content type: GET serves '$ct' and '$ct2' with fixture bytes"
+else
+  fail "configurable content type" "got: '$ct' / '$ct2' body=${body:0:20}"
+fi
 
 # 13. fixed error statuses
 for entry in 404 401 403 500 503; do
