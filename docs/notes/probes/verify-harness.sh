@@ -85,6 +85,88 @@ awk "BEGIN{exit !($ttfb < 0.5 && $t >= 1.15)}" \
   && pass "body-delay knob: ttfb=${ttfb}s total=${t}s" \
   || fail "body-delay knob" "ttfb=$ttfb total=$t expected ttfb<0.5 total>=1.15"
 
+# 3b. HEAD conformance on the hand-rolled header routes: HEAD must never
+#     carry a body. A stray body byte poisons the keep-alive connection a
+#     HEAD-first client (pdftract) reuses for its follow-up request — the
+#     poison check replays exactly that: HEAD, then GET on the same socket.
+head_poison() { # route  (small knob route only — second request must answer fast)
+  python3 - "$1" "$HP" <<'PYEOF'
+import socket, sys, time
+route, port = sys.argv[1], int(sys.argv[2])
+s = socket.create_connection(("127.0.0.1", port), timeout=5)
+s.sendall(f"HEAD /{route} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+buf = b""
+while b"\r\n\r\n" not in buf:
+    buf += s.recv(4096)
+time.sleep(0.6)  # let any stray body byte (and the knob) elapse
+s.sendall(f"GET /{route} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+s.settimeout(3)
+try:
+    line = s.recv(64)
+except socket.timeout:
+    line = b"<timeout>"
+print(line.split(b"\r\n")[0].decode(errors="replace"))
+PYEOF
+}
+for route in "slow/body/300" "stall"; do
+  line=$(head_poison "$route")
+  [ "$line" = "HTTP/1.1 200 OK" ] \
+    && pass "HEAD /$route is body-less; follow-up GET on same connection parses" \
+    || fail "HEAD /$route keep-alive" "second response line: $line (expected HTTP/1.1 200 OK)"
+done
+
+# 3c. trickle knob: headers + Content-Length immediate, one byte/100ms after —
+#     byte count proves the rate, duration proves the knob is the total time
+trick=$(curl -s -o /dev/null -w '%{size_download} %{time_total}' "http://127.0.0.1:$HP/trickle/1")
+nbytes=${trick%% *}; tsec=${trick##* }
+awk "BEGIN{exit !($nbytes == 10 && $tsec >= 0.9)}" \
+  && pass "trickle knob: $nbytes bytes over ${tsec}s (1 byte/100ms)" \
+  || fail "trickle knob" "bytes=$nbytes total=${tsec}s expected 10 bytes >= 0.9s"
+
+# 3d. Range/206: every range-capable route answers a ranged GET with 206 +
+#     Content-Range naming the clamped slice and the true resource length —
+#     the pdftract HttpRangeSource hard-requires a 206-capable origin — on
+#     both the plain and the TLS listener, with each route's stall phase
+#     still in place (small knobs: the assert only needs the headers).
+#     /rangetrickle's synthetic stream is secs*10 bytes, so its bytes=0-99
+#     request clamps to the stream; the fixture routes clamp to the actual
+#     fixture size.
+fixture_size=$(wc -c < "$WORK/fixture.pdf")
+range_assert() { # label curl-opts url resource-bytes
+  local label="$1" opts="$2" url="$3" total="$4"
+  local want_end=$(( total < 100 ? total - 1 : 99 ))
+  local hdr code cr
+  hdr=$(curl -s $opts -D- -o /dev/null -H 'Range: bytes=0-99' "$url")
+  code=$(printf '%s\n' "$hdr" | head -1 | awk '{print $2}')
+  cr=$(printf '%s\n' "$hdr" | tr -d '\r' | grep -i '^content-range:' | cut -d' ' -f2-)
+  if [ "$code" = "206" ] && [ "$cr" = "bytes 0-$want_end/$total" ]; then
+    pass "$label: ranged GET -> 206, Content-Range: $cr"
+  else
+    fail "$label" "code=$code content-range='$cr' expected 206 + 'bytes 0-$want_end/$total'"
+  fi
+}
+for scheme in "http http://127.0.0.1:$HP " "tls https://127.0.0.1:$TLS_SS -k"; do
+  set -- $scheme; name=$1; base=$2; opts=${3:-}
+  range_assert "Range/206 $name /ok.pdf" "$opts" "$base/ok.pdf" "$fixture_size"
+  range_assert "Range/206 $name /slow/connect/200" "$opts" "$base/slow/connect/200" "$fixture_size"
+  range_assert "Range/206 $name /slow/body/200" "$opts" "$base/slow/body/200" "$fixture_size"
+  range_assert "Range/206 $name /slow/rangestall/200" "$opts" "$base/slow/rangestall/200" "$fixture_size"
+  range_assert "Range/206 $name /rangetrickle/1 (clamps to stream)" "$opts" "$base/rangetrickle/1" 10
+done
+# negative control: /noranges.pdf keeps ignoring Range — 200 full-body, no
+# Accept-Ranges — which is what forces a Range client onto the plain source
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Range: bytes=0-99' \
+  "http://127.0.0.1:$HP/noranges.pdf")
+acc=$(curl -sI "http://127.0.0.1:$HP/noranges.pdf" | grep -ci '^accept-ranges:')
+[ "$code" = "200" ] && [ "$acc" = "0" ] \
+  && pass "/noranges.pdf negative control: ranged GET -> 200, no Accept-Ranges" \
+  || fail "/noranges.pdf negative control" "code=$code accept-ranges-count=$acc expected 200/0"
+# the 206 slice carries exactly the bytes the Content-Range promised
+slice=$(curl -s -H 'Range: bytes=0-99' "http://127.0.0.1:$HP/ok.pdf" | wc -c)
+[ "$slice" = "100" ] \
+  && pass "206 slice length matches the Content-Range span (100 bytes)" \
+  || fail "206 slice length" "got $slice bytes expected 100"
+
 # 4. redirect chain, configurable hop count: /r/N is exactly N redirects
 #    down to fixture bytes (including the zero-hop boundary /r/0)
 for n in 0 2 6; do

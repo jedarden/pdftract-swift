@@ -16,8 +16,14 @@ Single-command starts (see ../url-fetch-semantics.md):
     python3 server.py 18765 http.jsonl fixtures/mini.pdf
     python3 server.py 18443 tls_ss.jsonl fixtures/mini.pdf certs/self-signed.pem certs/self-signed.key
 
-Routes (mode selected by URL path):
-    /ok.pdf              200 fixture, Accept-Ranges: bytes       (happy path)
+Routes (mode selected by URL path). The range-capable routes (/ok.pdf,
+/slow/connect, /slow/body, /slow/rangestall, /rangetrickle) answer a GET
+carrying a satisfiable "Range: bytes=a-b" with 206 + Content-Range + the
+matching slice (416 + "Content-Range: bytes */<total>" when wholly past
+the end), preserving each route's stall phase; the pdftract HttpRangeSource
+refuses any origin that answers a ranged GET 200. /noranges.pdf is the
+negative control that keeps answering 200 full-body with no Accept-Ranges:
+    /ok.pdf              200/206 fixture, Accept-Ranges: bytes   (happy path)
     /plain.pdf           fixture with Content-Type: text/plain
     /octet.pdf           fixture with application/octet-stream
     /notype.pdf          fixture with no Content-Type header
@@ -39,8 +45,29 @@ Routes (mode selected by URL path):
     /slow/body/<MS>      body-delay knob: response headers + first byte sent
                          immediately, then silence MS ms, then the rest.
                          Client sees: headers instant, body stalled mid-read.
+                         HEAD gets headers only — HEAD must never carry a
+                         body, and a stray body byte poisons the keep-alive
+                         connection a HEAD-first client reuses.
+    /slow/rangestall/<MS> range-era twin of /slow/body: headers (incl.
+                         Accept-Ranges) return instantly so a Range client
+                         keeps its source, then the GET body stalls <MS> ms
+                         after the first byte — measures the read-phase
+                         timeout separately from the HEAD/TTFB phase
+    /rangetrickle/<SECONDS>  /trickle on a 206-capable route (cap 300):
+                         long total, 1 byte per 100 ms; a Range slice
+                         trickles at the same rate — pairs with
+                         /slow/rangestall to separate overall-timeout from
+                         idle/read-timeout through the Range source
     /hang                accept request, never respond (120 s)
-    /stall               headers promising 100000 bytes, send 9, stall (120 s)
+    /stall               headers promising 100000 bytes, send 9, stall (120 s);
+                         HEAD gets headers only (same keep-alive rule)
+    /trickle/<SECONDS>   headers + Content-Length immediately, then one byte
+                         every 100 ms for SECONDS seconds total (cap 300).
+                         Inter-byte gaps stay far below any read timeout
+                         while the total duration carries the knob — this is
+                         the overall-timeout vs idle-timeout separator: an
+                         overall cap fires at the deadline, an idle/read cap
+                         never fires and the transfer completes.
     /big/<MB>            valid single-page PDF padded to MB MiB (cap 64)
     /big.pdf             5 MiB variant of the above
     /zero.pdf            200 with empty body
@@ -50,6 +77,7 @@ Routes (mode selected by URL path):
 """
 import base64
 import json
+import re
 import ssl
 import sys
 import time
@@ -112,6 +140,37 @@ def padded_pdf(mb):
     return _FIXTURE_CACHE[key]
 
 
+def parse_byte_range(header, total):
+    """Parse a Range header against a `total`-byte representation.
+
+    Returns an inclusive (start, end) tuple clamped to the resource for a
+    satisfiable bytes= range, the string "unsatisfiable" for a valid bytes=
+    range lying wholly past the end, and None when the header is absent or
+    not a valid bytes= spec — an ignorable Range header must be answered
+    200 with the full body (RFC 9110 §14.1.1, §14.2).
+    """
+    if not header:
+        return None
+    m = re.fullmatch(r"\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*", header.strip())
+    if not m:
+        return None
+    first, last = m.group(1), m.group(2)
+    if first == "" and last == "":
+        return None  # "bytes=-" names no range: ignore the header
+    if total <= 0:
+        return "unsatisfiable"
+    if first == "":
+        # suffix form "bytes=-N": the final N bytes
+        if int(last) == 0:
+            return "unsatisfiable"
+        return (max(0, total - int(last)), total - 1)
+    start = int(first)
+    if start >= total:
+        return "unsatisfiable"
+    end = min(int(last), total - 1) if last else total - 1
+    return (start, end)
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -139,12 +198,55 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _select_range(self, body):
+        """Compute (code, payload, extra_headers) serving `body` under this
+        request's Range header: 206 + Content-Range + the clamped slice,
+        416 for a range wholly past the end, 200 + full body otherwise.
+        Always advertises Accept-Ranges: bytes. Routes that interleave
+        their send (slow/body, slow/rangestall, rangetrickle) use the
+        payload; the rest go through _send_ranged."""
+        extra = {"Accept-Ranges": "bytes"}
+        rng = parse_byte_range(self.headers.get("Range", ""), len(body))
+        if rng is None:
+            return 200, body, extra
+        if rng == "unsatisfiable":
+            extra["Content-Range"] = "bytes */%d" % len(body)
+            return 416, b"", extra
+        start, end = rng
+        extra["Content-Range"] = "bytes %d-%d/%d" % (start, end, len(body))
+        return 206, body[start:end + 1], extra
+
+    def _send_ranged(self, body, ctype="application/pdf"):
+        code, payload, extra = self._select_range(body)
+        self._send(code, payload, ctype=ctype if code != 416 else None,
+                   extra=extra)
+
+    def _send_stalled_body(self, ms):
+        """Headers (200, or 206 per Range) + first body byte immediately,
+        then <ms> silence, then the rest of the selected slice — the
+        body-delay phase split layered on top of Range handling. HEAD gets
+        headers only (a stray body byte poisons the keep-alive connection
+        a HEAD-first client reuses)."""
+        code, payload, extra = self._select_range(fixture_bytes())
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Content-Type", "application/pdf")
+        for k, v in extra.items():
+            self.send_header(k, v)
+        self.end_headers()
+        if self.command == "HEAD" or not payload:
+            return
+        self.wfile.write(payload[:1])
+        self.wfile.flush()
+        time.sleep(ms / 1000.0)
+        self.wfile.write(payload[1:])
+
     def _route(self):
         self._log()
         p = self.path.split("?")[0]
 
         if p == "/ok.pdf":
-            self._send(200, fixture_bytes(), extra={"Accept-Ranges": "bytes"})
+            self._send_ranged(fixture_bytes())
         elif p == "/plain.pdf":
             self._send(200, fixture_bytes(), ctype="text/plain")
         elif p == "/octet.pdf":
@@ -179,19 +281,34 @@ class Handler(BaseHTTPRequestHandler):
             )
         elif p.startswith("/slow/connect/"):
             ms = int(p.rsplit("/", 1)[1])
-            time.sleep(ms / 1000.0)
-            self._send(200, fixture_bytes(), extra={"Accept-Ranges": "bytes"})
+            time.sleep(ms / 1000.0)  # stall BEFORE any response header
+            self._send_ranged(fixture_bytes())
         elif p.startswith("/slow/body/"):
-            ms = int(p.rsplit("/", 1)[1])
-            body = fixture_bytes()
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(body)))
+            self._send_stalled_body(int(p.rsplit("/", 1)[1]))
+        elif p.startswith("/slow/rangestall/"):
+            # range-era twin of /slow/body (it predates /slow/body being
+            # 206-capable); kept because the timeout probes pair it with
+            # /rangetrickle — see ../url-fetch-semantics.md
+            self._send_stalled_body(int(p.rsplit("/", 1)[1]))
+        elif p.startswith("/rangetrickle/"):
+            # /trickle on a 206-capable route: long total, 100 ms inter-byte
+            # gaps — the pacing is the preserved stall phase, so a Range
+            # slice trickles at the same 1-byte/100ms rate and a per-request
+            # overall timeout aborts while an idle/read timeout sails
+            # through. Pairs with /slow/rangestall to separate the two.
+            secs = min(int(p.rsplit("/", 1)[1]), 300)
+            code, payload, extra = self._select_range(b"A" * (secs * 10))
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(payload)))
             self.send_header("Content-Type", "application/pdf")
+            for k, v in extra.items():
+                self.send_header(k, v)
             self.end_headers()
-            self.wfile.write(body[:1])
-            self.wfile.flush()
-            time.sleep(ms / 1000.0)
-            self.wfile.write(body[1:])
+            if self.command != "HEAD":
+                for i in range(len(payload)):
+                    self.wfile.write(payload[i:i + 1])
+                    self.wfile.flush()
+                    time.sleep(0.1)
         elif p == "/hang":
             time.sleep(120)  # accept request, never respond
         elif p == "/stall":
@@ -200,9 +317,22 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "100000")
             self.send_header("Content-Type", "application/pdf")
             self.end_headers()
-            self.wfile.write(b"%PDF-1.4\n")
-            self.wfile.flush()
-            time.sleep(120)
+            if self.command != "HEAD":
+                self.wfile.write(b"%PDF-1.4\n")
+                self.wfile.flush()
+                time.sleep(120)
+        elif p.startswith("/trickle/"):
+            secs = min(int(p.rsplit("/", 1)[1]), 300)
+            n = secs * 10
+            self.send_response(200)
+            self.send_header("Content-Length", str(n))
+            self.send_header("Content-Type", "application/pdf")
+            self.end_headers()
+            if self.command != "HEAD":
+                for _ in range(n):
+                    self.wfile.write(b"A")
+                    self.wfile.flush()
+                    time.sleep(0.1)
         elif p.startswith("/big/"):
             mb = min(int(p.rsplit("/", 1)[1]), 64)
             self._send(200, padded_pdf(mb))

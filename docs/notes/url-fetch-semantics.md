@@ -17,15 +17,16 @@ Everything is in `docs/notes/probes/`. One Python process serves every plain
 HTTP mode (and the same routes again under TLS when given a cert/key); a
 second process is the logging forward proxy; a shell script generates the
 three TLS certificates; a fourth script exercises the delay, redirect, TLS,
-proxy, size, content-type, status, and auth modes end-to-end with curl (29
-checks) and exits nonzero on any failure.
+proxy, size, content-type, status, auth, HEAD-conformance, trickle, and
+Range/206 modes end-to-end with curl (44 checks) and exits nonzero on any
+failure.
 
 | File | Role |
 |---|---|
 | `probes/server.py` | all endpoint modes, selected by URL path (JSONL request log) |
 | `probes/proxy.py` | minimal forwarding proxy for `HTTP_PROXY`/`HTTPS_PROXY`, logs absolute-form requests and CONNECT targets |
 | `probes/make-certs.sh` | openssl-generated self-signed / expired / hostname-mismatch certs |
-| `probes/verify-harness.sh` | starts every endpoint, runs 29 curl checks, tears down |
+| `probes/verify-harness.sh` | starts every endpoint, runs 44 curl checks, tears down |
 | `probes/fixtures/mini.pdf` | 1.4 KiB single-page fixture served by the PDF routes |
 
 Each mode starts with a single command (run from `docs/notes/probes/`):
@@ -54,9 +55,12 @@ log file, so a probe can assert exactly what the client sent.
 
 | Mode | Route | Observable behavior |
 |---|---|---|
-| happy path | `/ok.pdf` | 200, fixture, `Accept-Ranges: bytes` |
-| connect-delay | `/slow/connect/<MS>` | TCP accept is instant (kernel backlog); server stays silent `<MS>` ms before the first response byte → time-to-first-byte stall. A true connect-phase hang (SYN dropped) needs no server: use blackhole address `10.255.255.1` |
-| body-delay | `/slow/body/<MS>` | headers + first body byte immediately, then `<MS>` ms silence, then the rest → mid-body stall |
+| happy path | `/ok.pdf` | 200 — or 206 + `Content-Range` for a ranged GET — fixture body, `Accept-Ranges: bytes` |
+| connect-delay | `/slow/connect/<MS>` | TCP accept is instant (kernel backlog); server stays silent `<MS>` ms before the first response byte → time-to-first-byte stall. Ranged GETs are honored (206) after the same stall. A true connect-phase hang (SYN dropped) needs no server: use blackhole address `10.255.255.1` |
+| body-delay | `/slow/body/<MS>` | headers + first body byte immediately, then `<MS>` ms silence, then the rest → mid-body stall. Ranged GETs get 206 + the sliced body with the same first-byte-then-stall phase. HEAD gets headers only — a stray body byte on HEAD poisons the keep-alive connection a HEAD-first client reuses |
+| range-path body stall | `/slow/rangestall/<MS>` | `/slow/body` on a 206-capable route: headers (incl. `Accept-Ranges`) instant, GET body stalls `<MS>` ms after the first byte — separates the read-phase timeout from the HEAD/TTFB phase |
+| trickle | `/trickle/<SECONDS>` (cap 300) | headers + `Content-Length` immediately, then 1 byte per 100 ms for `<SECONDS>` s total → long total, tiny inter-byte gaps: the overall-timeout vs idle-timeout separator |
+| range trickle | `/rangetrickle/<SECONDS>` (cap 300) | `/trickle` on a 206-capable route: long total, 1 byte per 100 ms, a Range slice trickles at the same rate — pairs with `/slow/rangestall` to separate overall- from idle-timeout through the Range source |
 | redirect chain | `/r/<N>` | `<N>`-hop 302 chain ending at `/ok.pdf` (`/r/1` lands immediately) |
 | redirect loop | `/loop` | infinite 302 to itself — client redirect-limit behavior |
 | scheme downgrade | `/tlsredir` | 302 to an absolute `http://` URL (meaningful on a TLS port) |
@@ -65,9 +69,9 @@ log file, so a probe can assert exactly what the client sent.
 | TLS hostname mismatch | port 18455 | well-formed SAN `DNS:wrong.example.com` only |
 | oversized | `/big/<MB>` (cap 64), `/big.pdf` | valid single-page PDF padded to `<MB>` MiB / 5 MiB |
 | content type | `/plain.pdf`, `/octet.pdf`, `/notype.pdf`, `/ctype/<TYPE>` | fixture with wrong / octet-stream / missing / arbitrary `Content-Type` |
-| ranges | `/noranges.pdf` | no `Accept-Ranges` header |
+| ranges | `/noranges.pdf` | no `Accept-Ranges` header; a ranged GET is answered 200 full-body — the negative control. The range-capable routes (`/ok.pdf`, `/slow/*`, `/rangetrickle/*`) answer a satisfiable `Range: bytes=a-b` with 206 + `Content-Range` + the clamped slice (416 + `Content-Range: bytes */<total>` wholly past the end) |
 | HEAD-less | `/nohead` | `HEAD` → 405, `GET` → 200 |
-| truncated stall | `/stall` | `Content-Length: 100000`, sends 9 bytes, stalls 120 s |
+| truncated stall | `/stall` | `Content-Length: 100000`, sends 9 bytes, stalls 120 s (HEAD: headers only) |
 | silent hang | `/hang` | accepts request, never responds (120 s) |
 | empty body | `/zero.pdf` | 200, zero bytes |
 | statuses | `/404` `/401` `/403` `/500` `/503` | fixed error statuses (`/401` sends `WWW-Authenticate`) |
@@ -117,6 +121,15 @@ curl -sI http://127.0.0.1:18765/plain.pdf  | grep -i content-type   # text/plain
 curl -sI http://127.0.0.1:18765/octet.pdf  | grep -i content-type   # application/octet-stream
 curl -sI http://127.0.0.1:18765/notype.pdf | grep -ci content-type  # 0 (header absent)
 curl -s -o /dev/null -w '%{content_type}\n' http://127.0.0.1:18765/ctype/application/x-vnd.pdftract-probe
+
+# Range/206: range-capable routes answer a ranged GET 206 + Content-Range
+# (416 when wholly past the end); the TLS listener behaves identically
+curl -s  -o /dev/null -D- -H 'Range: bytes=0-99' http://127.0.0.1:18765/ok.pdf
+#   -> HTTP/1.1 206 Partial Content / Content-Range: bytes 0-99/1412
+curl -sk -o /dev/null -D- -H 'Range: bytes=0-99' https://127.0.0.1:18443/slow/body/200
+#   -> 206 with the same first-byte-then-stall phase as the unranged GET
+curl -s  -o /dev/null -D- -H 'Range: bytes=0-99' http://127.0.0.1:18765/noranges.pdf
+#   -> 200 (negative control: Range ignored, no Accept-Ranges)
 
 # ranges: no Accept-Ranges header
 curl -sI http://127.0.0.1:18765/noranges.pdf | grep -ci accept-ranges    # 0
@@ -170,9 +183,20 @@ bash verify-harness.sh
 ```
 
 starts the plain server, the three TLS servers, and the proxy in a scratch
-dir, runs 29 checks (connect-delay asserts the phase split — connect instant,
+dir, runs 44 checks (connect-delay asserts the phase split — connect instant,
 ttfb ≥ 1.15 s — while body-delay asserts the inverse — ttfb fast, total
-≥ 1.15 s; `/r/0` `/r/2` `/r/6` each exactly N redirects down to fixture bytes,
+≥ 1.15 s; the two hand-rolled-header routes are additionally asserted
+HEAD-conformant by replaying a HEAD-first client: HEAD, then GET on the same
+connection, expecting a clean `HTTP/1.1 200 OK` status line and not stray
+body bytes; `/trickle/1` serves exactly 10 bytes over ≥ 0.9 s proving the
+knob is the total duration at a fixed 1-byte/100ms rate; all five
+range-capable routes — `/ok.pdf`, `/slow/connect`, `/slow/body`,
+`/slow/rangestall`, `/rangetrickle` — answer `Range: bytes=0-99` with `206`
+and a `Content-Range` clamped to the true resource length (the
+`/rangetrickle` stream clamps to its 10 bytes) on both the plain and the TLS
+listener, `/noranges.pdf` keeps answering a ranged GET `200` with no
+`Accept-Ranges`, and the `/ok.pdf` 206 slice delivers exactly its promised
+100 bytes; `/r/0` `/r/2` `/r/6` each exactly N redirects down to fixture bytes,
 plus `/r/6` → 302 → `/r/5`; loop abort with curl exit 47 under
 `--max-redirs 3`; each TLS server serves under `-k` and fails verification the
 intended way with exit 60 — the self-signed case against the system trust
