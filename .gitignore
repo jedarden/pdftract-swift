@@ -1,3 +1,10 @@
 .DS_Store
 .build/
 .swiftpm/
+
+# bead-rs runtime telemetry (live-written, never committed — only
+# .beads/checkpoint/ is durable and tracked)
+.beads/diagnostics/
+.beads/traces/
+.beads/events.jsonl
+.beads/heartbeats.jsonl
