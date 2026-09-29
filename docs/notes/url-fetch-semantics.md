@@ -16,15 +16,16 @@ for the moment a remote-enabled build exists.
 Everything is in `docs/notes/probes/`. One Python process serves every plain
 HTTP mode (and the same routes again under TLS when given a cert/key); a
 second process is the logging forward proxy; a shell script generates the
-three TLS certificates; a fourth script demonstrates every mode with curl and
-exits nonzero on any failure.
+three TLS certificates; a fourth script exercises the delay, redirect, TLS,
+proxy, size, content-type, status, and auth modes end-to-end with curl (29
+checks) and exits nonzero on any failure.
 
 | File | Role |
 |---|---|
 | `probes/server.py` | all endpoint modes, selected by URL path (JSONL request log) |
 | `probes/proxy.py` | minimal forwarding proxy for `HTTP_PROXY`/`HTTPS_PROXY`, logs absolute-form requests and CONNECT targets |
 | `probes/make-certs.sh` | openssl-generated self-signed / expired / hostname-mismatch certs |
-| `probes/verify-harness.sh` | starts every endpoint, runs 27 curl checks, tears down |
+| `probes/verify-harness.sh` | starts every endpoint, runs 29 curl checks, tears down |
 | `probes/fixtures/mini.pdf` | 1.4 KiB single-page fixture served by the PDF routes |
 
 Each mode starts with a single command (run from `docs/notes/probes/`):
@@ -73,6 +74,79 @@ log file, so a probe can assert exactly what the client sent.
 | basic auth | `/auth.pdf` | 200 only with `Authorization: Basic` of `user:pass` (build the header at runtime, e.g. `printf 'user:pass' \| base64`) |
 | header echo | `/echo` | 200 JSON echo of received headers |
 
+### Per-mode demonstration
+
+One curl per mode against the ports above (server/proxy started as shown,
+certs generated once). Each command shows the documented misbehavior; exit
+codes quoted are curl's.
+
+```bash
+# happy path — 200 fixture, Accept-Ranges: bytes
+curl -sD- -o /dev/null http://127.0.0.1:18765/ok.pdf
+
+# connect-delay: connect instant, first response byte after the knob
+curl -s -o /dev/null -w 'conn=%{time_connect} ttfb=%{time_starttransfer}\n' \
+    http://127.0.0.1:18765/slow/connect/1200        # conn ~0, ttfb ~1.2 s
+
+# body-delay: headers + first byte instant, total carries the knob
+curl -s -o /dev/null -w 'ttfb=%{time_starttransfer} total=%{time_total}\n' \
+    http://127.0.0.1:18765/slow/body/1200           # ttfb ~0, total ~1.2 s
+
+# true connect-phase hang — no server involved (SYN dropped, exit 28)
+curl -s --connect-timeout 4 -o /dev/null http://10.255.255.1/ok.pdf
+
+# redirect chain: exactly N hops down to fixture bytes
+curl -sL -o /dev/null -w '%{num_redirects} %{http_code}\n' http://127.0.0.1:18765/r/6   # "6 200"
+
+# redirect loop: aborts at the redirect limit (exit 47)
+curl -sL --max-redirs 3 -o /dev/null http://127.0.0.1:18765/loop
+
+# scheme downgrade (on a TLS port): 302 to an absolute http:// URL
+curl -sk -o /dev/null -w '%{http_code} %{redirect_url}\n' https://127.0.0.1:18443/tlsredir
+
+# TLS misbehavior — all three reject with curl exit 60
+curl -s https://127.0.0.1:18443/ok.pdf                                  # untrusted root (system trust)
+curl -s --cacert certs/expired.pem  https://127.0.0.1:18444/ok.pdf      # certificate has expired
+curl -s --cacert certs/mismatch.pem https://127.0.0.1:18455/ok.pdf      # no subject name matches
+
+# oversized: valid single-page PDF padded to the knob (cap 64 MiB)
+curl -s -o /dev/null -w '%{size_download}\n' http://127.0.0.1:18765/big/3    # ≥ 3 MiB
+
+# content-type variants (fixture bytes in every case)
+curl -sI http://127.0.0.1:18765/plain.pdf  | grep -i content-type   # text/plain
+curl -sI http://127.0.0.1:18765/octet.pdf  | grep -i content-type   # application/octet-stream
+curl -sI http://127.0.0.1:18765/notype.pdf | grep -ci content-type  # 0 (header absent)
+curl -s -o /dev/null -w '%{content_type}\n' http://127.0.0.1:18765/ctype/application/x-vnd.pdftract-probe
+
+# ranges: no Accept-Ranges header
+curl -sI http://127.0.0.1:18765/noranges.pdf | grep -ci accept-ranges    # 0
+
+# HEAD-less: HEAD 405, GET 200
+curl -s -o /dev/null -w '%{http_code}\n' -I http://127.0.0.1:18765/nohead
+curl -s -o /dev/null -w '%{http_code}\n'    http://127.0.0.1:18765/nohead
+
+# truncated stall: promises 100000 bytes, sends 9, stalls — cut it off
+curl -s --max-time 3 http://127.0.0.1:18765/stall | wc -c                # 9
+
+# silent hang: request accepted, no response (exit 28 at --max-time)
+curl -s --max-time 2 -o /dev/null http://127.0.0.1:18765/hang
+
+# empty body: 200, zero bytes
+curl -s -o /dev/null -w '%{http_code} %{size_download}\n' http://127.0.0.1:18765/zero.pdf
+
+# error statuses
+for s in 404 401 403 500 503; do
+  curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:18765/$s"
+done
+
+# basic auth: 200 with the runtime-built header, 401 without
+curl -s -H "Authorization: Basic $(printf 'user:pass' | base64)" \
+    -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18765/auth.pdf
+
+# header echo: exactly what the server received
+curl -s http://127.0.0.1:18765/echo | python3 -m json.tool
+```
+
 ### Proxy
 
 ```bash
@@ -84,22 +158,35 @@ HTTPS_PROXY=http://127.0.0.1:18888 curl -s --cacert certs/self-signed.pem \
 
 Absolute-form requests are logged with their full header set and re-issued
 origin-form at the origin; CONNECT tunnels are logged by target and relayed
-blindly (the tunneled TLS bytes are opaque by design).
+blindly (the tunneled TLS bytes are opaque by design). An origin-form request
+(i.e. a client *not* configured to use the proxy) is answered 400 and logged
+as `"type": "unexpected"`, so a probe can also assert that proxy env vars
+actually took effect on the client.
 
-### Demonstrating every mode
+### End-to-end harness check
 
 ```bash
 bash verify-harness.sh
 ```
 
 starts the plain server, the three TLS servers, and the proxy in a scratch
-dir, runs 27 checks (delay knobs ≥ 1.15 s wall time, `/r/6` → 302 → `/r/5`
-and follows to fixture, loop abort with curl exit 47, each TLS server serves
-under `-k` and fails verification the intended way with exit 60, self-signed
-accepted when pinned, proxy forwards + logs both shapes, `/big/2` ≥ 2 MiB,
-arbitrary content type echoed, all five error statuses, basic auth accepted
-with `user:pass` and rejected with wrong credentials, JSONL log captures
-method/path/User-Agent), and prints `ALL CHECKS PASSED` on success.
+dir, runs 29 checks (connect-delay asserts the phase split — connect instant,
+ttfb ≥ 1.15 s — while body-delay asserts the inverse — ttfb fast, total
+≥ 1.15 s; `/r/0` `/r/2` `/r/6` each exactly N redirects down to fixture bytes,
+plus `/r/6` → 302 → `/r/5`; loop abort with curl exit 47 under
+`--max-redirs 3`; each TLS server serves under `-k` and fails verification the
+intended way with exit 60 — the self-signed case against the system trust
+store, since `--cacert` pinning would make it its own trust anchor; self-signed
+accepted when pinned; proxy forwards and logs both absolute-form and CONNECT
+shapes; `/big/2` and `/big/4` each honoring their own MiB floor, strictly
+increasing, head and tail PDF-valid; two arbitrary content types including a
+slash subtype echoed with fixture bytes via GET; all five error statuses;
+basic auth accepted with `user:pass` and rejected with wrong credentials;
+JSONL log captures method/path/User-Agent), and prints `ALL CHECKS PASSED`
+on success. The modes the script does not automate — `/tlsredir`, `/stall`,
+`/hang`, `/zero.pdf`, `/nohead`, `/noranges.pdf`, the fixed content-type
+routes, `/echo`, and the blackhole connect hang — are covered by the per-mode
+curl one-liners above.
 
 ### Prior salvage (probe-tmp, 2026-09-29)
 
@@ -134,6 +221,13 @@ Fallback candidate `~/.cargo/bin/pdftract` (local build 2026-08-25, sha256
 `ac1a3d951b44bc7a70616d1597bf8fe7db30d908cb238ceaaef3943ed7dd3432`) has the
 identical limitation, so per the bead's condition ("acceptable only if it
 supports the `.url` input source") it does not qualify either.
+
+Re-verified 2026-09-29 against the live Forgejo release: v1.2.0 is still the
+only release (published 2026-09-29T07:04:42Z), the `SHA256SUMS` entry and the
+downloaded tarball both hash to the value above, the tarball's size matches
+the release asset byte count, and a fresh extraction of the tarball reproduces
+the binary sha256 exactly. The `.url` block at the feature gate stands: no
+`--features remote` build exists, released or local.
 
 **Consequence for the probe children:** every `.url` probe currently
 deterministically exits 2 at the feature gate — no network I/O happens, so
