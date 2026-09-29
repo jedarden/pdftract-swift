@@ -40,7 +40,7 @@ gen() { # name subject extra-req-args...
   local name="$1" subj="$2"; shift 2
   "$OPENSSL_BIN" req -x509 -newkey rsa:2048 -keyout "$OUT/$name.key" \
     -out "$OUT/$name.pem" -nodes -subj "$subj" "$@" \
-    2>&1 | grep -vE '^[.+*]+$' >&2
+    2>&1 | sed -E '/^[.+*-]+$/d' >&2
 }
 
 if "$OPENSSL_BIN" req -x509 -help 2>&1 | grep -q -- -not_after; then
