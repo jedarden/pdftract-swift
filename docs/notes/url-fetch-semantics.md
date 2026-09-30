@@ -18,7 +18,8 @@ remote-enabled build are recorded in the measured sections below
 [Proxy handling](#proxy-handling-measured-remote-enabled-build),
 [Redirects](#redirects-measured-remote-enabled-build),
 [Content type and body
-validity](#content-type-and-body-validity-measured-remote-enabled-build)).
+validity](#content-type-and-body-validity-measured-remote-enabled-build),
+and [Exit codes](#exit-codes-measured-remote-enabled-build)).
 
 ## Probe harness
 
@@ -1490,4 +1491,101 @@ output MIME types (`crates/pdftract-core/src/output/multi.rs:32-33`).
 The header is neither validated nor recorded by the fetch; parsing
 receives raw bytes and applies the PDF structure gate (`startxref`),
 which is the single content gate measured above.
+
+## Exit codes (measured, remote-enabled build)
+
+Fresh probe matrix for the exit-code child of the auto-split (bead
+pdfswift-c509e162, 2026-09-30), same binary and harness as every section
+above (sha256 `07f95264…c48e0d`, `--version` `pdftract 0.1.0` — the crate
+version, not the release tag; source citations are the `v1.2.0` tag tree,
+HEAD `f4f6d6a8`). Captures: `~/scratch/pdfswift-4c4d046f/captures-c509e162/`
+(`summary.txt`, one `.out`/`.err` pair per probe, `captures-c509e162-probe.sh`).
+The origin sidecar witnesses the probes (e.g. two `HEAD /missing.pdf`
+entries with `User-Agent: ureq/2.12.1` for the 404 pair); the TLS pairs
+leave no sidecar line because verification fails pre-HTTP.
+
+**Verdict — the hash URL-failure exit surface is the single value 2, and
+the extract failure surface is the single value 1. Exit codes 4, 5, and 6
+(and 3) of the hash exit-code table are defined but UNREACHABLE in the
+v1.2.0 build: no network condition triggers any of them, because the
+keyword mapper inspects only the top-level anyhow context and `run_hash`
+fixes that context to a string containing none of the mapper's keywords.**
+
+### The observed mapping
+
+21 probes, each an executed command with exit code, wall time, and
+byte-counted stdout/stderr captured in the directory above.
+
+| Exit | Subcommand | Conditions observed (all measured 2026-09-30) |
+|---|---|---|
+| 0 | extract, hash | happy path `/ok.pdf`: extract 183 B markdown (67 ms); hash `pdftract-v1:ab24a95f44ec…` (77 B, 61 ms) — plus hash of the local harness fixture (0, 17 ms) |
+| 1 | extract | every failure measured (8/8): connection refused (17 ms), DNS nonexistent host (20196 ms), TLS self-signed/expired/mismatch (20–23 ms), HEAD timeout `/slow/connect/15000` (10439 ms), HTTP 404 (17 ms), missing local file (15 ms) — stderr carries the full `Caused by:` chain (table below) |
+| 2 | hash | every URL failure measured (7/7): connection refused (16 ms), DNS nonexistent host (20154 ms), TLS self-signed (12 ms), expired (20 ms), mismatch (21 ms), HEAD timeout (10239 ms), HTTP 404 (20 ms) — **all with the byte-identical 46 B single-line stderr `Error: Failed to compute fingerprint from URL`**; the cause chain is never printed |
+| 2 | hash | missing local file (16 ms) — same invariant over the file branch, stderr `Error: Failed to compute fingerprint from file` (47 B) |
+| 2 | (any subcommand) | clap usage errors: `hash` with no required arg (143 B), unrecognized subcommand (115 B) |
+| 2 | (any subcommand) | the remote feature gate of a non-remote build (`hash.rs:315-319`): the gate message also contains no mapper keyword |
+
+No probe in the matrix produced 3, 4, 5, or 6. A stalled body still never
+returns its own code — it ends only at an external `timeout` cap (124,
+[Response size](#response-size-measured-remote-enabled-build)).
+
+### What 4, 5, and 6 would have required (source-corroborated, v1.2.0 tree)
+
+- `crates/pdftract-cli/src/hash.rs:18-23` defines the table:
+  `EXIT_SUCCESS=0`, `EXIT_CORRUPT=2`, `EXIT_ENCRYPTED=3`,
+  `EXIT_NOT_FOUND=4`, `EXIT_NETWORK_FAILURE=5`, `EXIT_TLS_FAILURE=6`.
+- `main.rs:838-841` dispatches every `hash` failure through
+  `map_error_to_exit_code(&e)` and prints `Error: {}` — anyhow `Display`,
+  i.e. the OUTERMOST context only, never the cause chain.
+- `run_hash` fixes that outermost context on both branches:
+  `.context("Failed to compute fingerprint from URL")` (`hash.rs:310`) and
+  `.context("Failed to compute fingerprint from file")` (`hash.rs:325`).
+- `map_error_to_exit_code` (`hash.rs:36-70`) keyword-scans exactly
+  `err.to_string().to_lowercase()` — that fixed outermost string. Neither
+  context contains any of `encryption`/`password`/`decrypt` (→3),
+  `tls`/`certificate`/`handshake` (→6), `network`/`timeout`/`connection`
+  (→5), `dns`/`hostname`/`resolution`/`not found`/`no such file`/
+  `permission denied` (→4), so the scan falls through to the
+  `EXIT_CORRUPT` default (2) for **every possible** hash failure. Only the
+  mapper's default branch is reachable from hash; the keyword branches are
+  dead code. The gate message (`hash.rs:315-319`) is keyword-free too.
+- extract never consults the mapper: its dispatch (`main.rs:704-711`)
+  exits 3 only when the error text contains an encryption keyword
+  (`decryption failed`, `PDF decryption failed`, `Unsupported encryption`,
+  `Wrong password`), else 1. Code 3 is therefore extract/classify-only and
+  encryption-only — a parse-phase outcome, not a network one (no encrypted
+  fixture exists in this harness to exercise it end-to-end; recorded
+  source-only). The extract-side fetch context is
+  `Failed to open remote PDF source` (`remote.rs:79`), printed with the
+  full chain by `report_error` (`main.rs:589-599`).
+
+### The conditions that would have mapped — and what actually fired
+
+| Condition | extract (measured) | cause text one level down | hash (measured) | Code the keyword WOULD have produced |
+|---|---|---|---|---|
+| DNS nonexistent host | 1 (20196 ms) | `HEAD request failed: DNS resolution failed` | 2 (20154 ms) | 4 (`dns`, `resolution`) |
+| missing local file | 1 (15 ms) | `No such file or directory (os error 2)` | 2 (16 ms) | 4 (`no such file`) |
+| connection refused (dead port 18999) | 1 (17 ms) | `HEAD request failed: connection interrupted` | 2 (16 ms) | 5 (`connection`) |
+| HEAD timeout (`/slow/connect/15000`) | 1 (10439 ms) | `HEAD request failed: request timeout` | 2 (10239 ms) | 5 (`timeout`) |
+| TLS self-signed / expired / mismatch | 1 (20–23 ms) | `HEAD request failed: connection interrupted` | 2 (12–21 ms) | 5 (`connection`) — the TLS conditions carry **no** `tls`/`certificate`/`handshake` marker anywhere in the cause, so even a chain-scanning mapper could never produce 6 for them |
+| HTTP 404 | 1 (17 ms) | `HEAD request failed: HTTP 404` | 2 (20 ms) | none → 2 |
+
+The irony the probes expose: every cause string the mapper was written to
+classify is produced in the live build — one context level down, and only
+on the extract path, whose exit code ignores the mapper entirely.
+
+**Defect statement:** `pdftract hash <url>` error reporting is
+structurally broken on v1.2.0 — whatever the failure (unresolvable host,
+refused, TLS-rejected, timeout, 404, or even a missing local file),
+stderr is a single cause-free line and the exit code is invariantly 2,
+indistinguishable from a clap usage error and from the remote-feature
+gate of a non-remote build. Suggested fix shape (future work): classify
+over the anyhow cause chain (`err.chain()`) or map before the
+`.context(…)` wrap — noting `EXIT_TLS_FAILURE`'s keywords can never match
+ureq 2.12.1's transport text (`connection interrupted`) even then.
+
+**SDK-mirroring consequence:** a Swift client claiming pdftract
+compatibility must surface exit 1 for every extract failure and exit 2
+for every hash failure regardless of cause; extract's stderr carries the
+full `Caused by:` chain, hash's carries only the top context line.
 
