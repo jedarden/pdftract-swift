@@ -19,7 +19,8 @@ remote-enabled build are recorded in the measured sections below
 [Redirects](#redirects-measured-remote-enabled-build),
 [Content type and body
 validity](#content-type-and-body-validity-measured-remote-enabled-build),
-and [Exit codes](#exit-codes-measured-remote-enabled-build)).
+and [Exit codes](#exit-codes-measured-remote-enabled-build)), summarized in
+[Summary of concrete observed values](#summary-of-concrete-observed-values).
 
 ## Probe harness
 
@@ -1591,4 +1592,32 @@ ureq 2.12.1's transport text (`connection interrupted`) even then.
 compatibility must surface exit 1 for every extract failure and exit 2
 for every hash failure regardless of cause; extract's stderr carries the
 full `Caused by:` chain, hash's carries only the top context line.
+
+## Summary of concrete observed values
+
+Every value below was measured against the same remote-enabled v1.2.0
+build (sha256 `07f95264…c48e0d`, `--version` `pdftract 0.1.0`) on the
+same five-listener harness, and is cited in the section named. Where two
+runs report different walls or byte counts for the same behavior, both
+are quoted and explained — listener warmth moves the walls, and the
+exit-code matrix extracted with `--md -` (183 B markdown) where every
+other section used the default JSON output (3241 B) for the same fixture;
+no value contradicts another.
+
+| Behavior | Observed value | Section |
+|---|---|---|
+| happy path | extract exit 0 — 3241 B JSON stdout by default, 183 B markdown with `--md -` (67 ms); hash exit 0, fingerprint `pdftract-v1:ab24a95f44ec…` (77 B, 61 ms), identical across every run of the effort | [Exit codes](#exit-codes-measured-remote-enabled-build) |
+| TCP connect deadline | ~30 s (blackhole SYN drop: 30020/30035 ms, exit 1) | [Timeouts](#timeouts-measured-remote-enabled-build) |
+| per-request post-connect deadline | ~10 s — the HEAD aborts cleanly (10314–10439 ms, exit 1, `HEAD request failed: request timeout`); an 8 s stall is waited out (exit 0) | [Timeouts](#timeouts-measured-remote-enabled-build) |
+| body-phase stall / truncation | no deadline: the same ranged GET is re-issued forever with the error swallowed and empty stderr, ending only at an external kill (exit 124; 27k–250k re-issued windows observed in 90 s) | [Timeouts](#timeouts-measured-remote-enabled-build), [Response size](#response-size-measured-remote-enabled-build) |
+| DNS resolution failure | ~20 s to failure (extract 20196 ms → exit 1; hash 20154 ms → exit 2) | [Exit codes](#exit-codes-measured-remote-enabled-build) |
+| redirects | followed; hard limit of 4 followed hops (`reached max redirects (5)` on the 5th 3xx); all of 301/302/303/307/308; relative/absolute/cross-port/cross-host Locations; fresh budget per phase; `Range` preserved across hops | [Redirects](#redirects-measured-remote-enabled-build) |
+| TLS verification | strict, compiled-in webpki-roots; untrusted/expired/mismatch all rejected pre-HTTP (8–11 ms in the TLS matrix, 12–23 ms in the exit-code matrix) with one byte-identical 100 B cause-free stderr (md5 `007483650c…`); `SSL_CERT_FILE`/`SSL_CERT_DIR` inert; a publicly-trusted chain is accepted (1216 B extraction) | [TLS verification](#tls-verification-measured-remote-enabled-build) |
+| proxy env | `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` (both cases), live and dead, all ignored — always direct; `NO_PROXY` vacuous (nothing to bypass); the strongest single datapoint is success with a dead proxy on 18999 | [Proxy handling](#proxy-handling-measured-remote-enabled-build) |
+| response size limit | none through 402,653,632 B (384 MiB): every rung exit 0 with a byte-identical extraction; read pattern is 1 HEAD + ⌈len/65536⌉ ranged GETs (`BLOCK_SIZE = 65536`) | [Response size](#response-size-measured-remote-enabled-build) |
+| content type | never inspected — `text/html`, `text/plain`, `application/octet-stream`, absent: all extracted identically to `application/pdf` (shared md5 `96218ba6…`); non-PDF bytes are rejected under every label (133 B `startxref` stderr, md5 `ac6c99af…`); no magic-byte sniffing either | [Content type and body validity](#content-type-and-body-validity-measured-remote-enabled-build) |
+| empty body (`Content-Length: 0`) | HEAD-only (no GET issued); parse error `startxref not found in PDF`, exit 1 — while a minimal valid 431 B body exits 0 | [Response size](#response-size-measured-remote-enabled-build), [Content type and body validity](#content-type-and-body-validity-measured-remote-enabled-build) |
+| non-200 statuses | surfaced verbatim as the HEAD cause (`HTTP 404` / `HTTP 500`, 86 B stderr), aborting before any body byte — the error body is never fetched | [Content type and body validity](#content-type-and-body-validity-measured-remote-enabled-build) |
+| extract exit codes | 0 on success; 1 for every failure observed; 3 is encryption-only and parse-phase (source-only — no encrypted fixture exists in this harness) | [Exit codes](#exit-codes-measured-remote-enabled-build) |
+| hash exit codes | 0 on success; 2 for EVERY failure observed — refused, DNS, all three TLS conditions, HEAD timeout, 404, missing local file — and for clap usage errors and the non-remote feature gate; 3/4/5/6 are defined (`hash.rs:18-23`) but unreachable (the mapper reads only the fixed outermost anyhow context) | [Exit codes](#exit-codes-measured-remote-enabled-build) |
 
