@@ -1337,6 +1337,15 @@ serving NON-PDF bytes under an arbitrary — or absent — `Content-Type`,
 the cell the 18767 sidecar's `/garbage` (always labeled
 `application/pdf`) cannot fill.
 
+Run 7 (same day, after this section was committed:
+`console-run7-f58e6a06.txt`, `captures-run7-f58e6a06/`, script
+`run7-verify-f58e6a06.sh`) re-ran the entire matrix fresh against the
+same live listeners: every exit code, stdout/stderr byte size, stderr
+text, extraction md5, and per-probe request count reproduced identically
+(fixture stdout md5 `96218ba6…`, body-rejection stderr md5
+`ac6c99af…`, 404/500 and range-control stderr byte-identical to run 6's
+captures), so every value below stands as re-measured.
+
 **Verdict — the response `Content-Type` header is never inspected: every
 content type is fetched and parsed identically. The only content gate is
 the PDF parser applied to the bytes.** The task's
