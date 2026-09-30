@@ -400,6 +400,26 @@ Mechanism), and the value matches ureq 2.12.1's built-in connect default
 (`timeout_connect: Some(Duration::from_secs(30))`, ureq `src/agent.rs:256`),
 which pdftract does not override.
 
+### Connect-phase re-verification (2026-09-30)
+
+All three connect-phase probes re-run fresh on 2026-09-30 against the same
+binary (sha256 `07f95264…c48e0d` re-confirmed unchanged, so the 2026-09-29
+evidence above is in force) and an identically-started harness (`server.py`
+18765, JSONL log and per-probe captures in session scratch
+`~/scratch/pdfswift-93a1b05e/`, ports pre-cleared, method unchanged). Values
+reproduce:
+
+| Probe | Fresh wall | Exit | stderr | Server-log gap |
+|---|---|---|---|---|
+| `/slow/connect/15000` | 10158 ms | 1 | identical to the verbatim block above | HEAD at t=…734.602, no further request until t=…744.761 — 10.159 s gap, no retry, abort inside the server's 15 s silence |
+| `/slow/connect/8000` | 16055 ms | 0 | empty | HEAD at t=…744.761 → ranged GET at t=…752.761, the full 8.001 s stall survived |
+| blackhole `10.255.255.1` | 30035 ms | 1 | identical to the verbatim block above | none — no server involved |
+
+Across runs: `/slow/connect/15000` 10158 / 10314 / 10328 ms and blackhole
+30020 / 30035 / 30035 ms, all exit 1; `/slow/connect/8000` 16053 / 16055 ms,
+exit 0. The ~10 s post-connect deadline and the ~30 s TCP-connect deadline
+both stand.
+
 ### Read / mid-body stall — HTTP
 
 `/slow/body/<MS>` sends headers + first body byte immediately, then stalls
