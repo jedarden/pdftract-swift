@@ -1499,7 +1499,10 @@ pdfswift-c509e162, 2026-09-30), same binary and harness as every section
 above (sha256 `07f95264…c48e0d`, `--version` `pdftract 0.1.0` — the crate
 version, not the release tag; source citations are the `v1.2.0` tag tree,
 HEAD `f4f6d6a8`). Captures: `~/scratch/pdfswift-4c4d046f/captures-c509e162/`
-(`summary.txt`, one `.out`/`.err` pair per probe, `captures-c509e162-probe.sh`).
+(`summary.txt`, one `.out`/`.err` pair per probe). Attempt 2 (2026-09-30)
+re-ran one probe per condition class against the same binary and harness
+(`confirm-summary.txt`, `cf-*` pairs, `captures-c509e162-confirm-probe.sh`):
+every code, hash stderr byte count, and extract cause reproduced.
 The origin sidecar witnesses the probes (e.g. two `HEAD /missing.pdf`
 entries with `User-Agent: ureq/2.12.1` for the 404 pair); the TLS pairs
 leave no sidecar line because verification fails pre-HTTP.
