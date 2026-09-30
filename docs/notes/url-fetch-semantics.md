@@ -16,7 +16,9 @@ remote-enabled build are recorded in the measured sections below
 [Response size](#response-size-measured-remote-enabled-build),
 [TLS verification](#tls-verification-measured-remote-enabled-build),
 [Proxy handling](#proxy-handling-measured-remote-enabled-build),
-[Redirects](#redirects-measured-remote-enabled-build)).
+[Redirects](#redirects-measured-remote-enabled-build),
+[Content type and body
+validity](#content-type-and-body-validity-measured-remote-enabled-build)).
 
 ## Probe harness
 
@@ -1313,4 +1315,170 @@ Sidecar provenance note: the first cut of the reset routes advertised
 entirely and reproduce the `/zero.pdf` parse failure (captures
 `rst-midbody`/`rst-immediate`); the HEAD was corrected to advertise the
 real 100000 and the probes re-run (`rst2-*`), which is the evidence above.
+
+## Content type and body validity (measured, remote-enabled build)
+
+Same build, harness, and method as
+[Response size](#response-size-measured-remote-enabled-build): clean proxy
+env (all eight `*_PROXY`/`NO_PROXY` variants unset),
+`timeout 90 pdftract-remote extract <url>`, per-probe stdout/stderr
+captures, wall via `date +%s%3N`, binary identity re-confirmed at probe
+time (sha256
+`07f95264e59395a30ae622e42c7bd5f882583a20091a89c3ba665c9f16c48e0d`,
+`--version` `pdftract 0.1.0`). First measured in run 3 (2026-09-30,
+`~/scratch/pdfswift-1645a5cc/console-run3.txt`, `captures-run3/`), then
+re-verified and extended fresh the same day by bead pdfswift-f58e6a06
+(run 6: `console-run6-f58e6a06.txt`, `captures-run6-f58e6a06/` — every
+value below is run 6 unless marked run 3) against the same live listener
+state (five-listener harness + the 18767 size sidecar, neither restarted)
+plus a content-type sidecar variant on 127.0.0.1:18769
+(`ctype-sidecar-f58e6a06.py`, same range handling and JSONL request log)
+serving NON-PDF bytes under an arbitrary — or absent — `Content-Type`,
+the cell the 18767 sidecar's `/garbage` (always labeled
+`application/pdf`) cannot fill.
+
+**Verdict — the response `Content-Type` header is never inspected: every
+content type is fetched and parsed identically. The only content gate is
+the PDF parser applied to the bytes.** The task's
+fetched/rejected/ignored question therefore resolves to **ignored** for
+the header itself: it is neither validated nor recorded; acceptance and
+rejection both track the bytes.
+
+### Fixture PDF bytes under every label — all fetched and parsed identically
+
+| Probe (run 6) | Probe command (`pdftract-remote extract <url>`) | `Content-Type` served | Wall | Exit | stdout | Requests the server saw |
+|---|---|---|---|---|---|---|
+| ctrl-okpdf | `…/18765/ok.pdf` | `application/pdf` | 54 ms | 0 | 3241 B | HEAD + 1 GET |
+| ctype-pdf | `…/18767/ctype/application/pdf` | `application/pdf` | 54 ms | 0 | 3241 B | HEAD + 1 GET |
+| ctype-html | `…/18767/ctype/text/html` | `text/html` | 53 ms | 0 | 3241 B | HEAD + 1 GET |
+| ctype-octet | `…/18767/ctype/application/octet-stream` | `application/octet-stream` | 54 ms | 0 | 3241 B | HEAD + 1 GET |
+| ctype-absent | `…/18767/noctype` | header absent | 54 ms | 0 | 3241 B | HEAD + 1 GET |
+
+All five extractions are md5-identical
+(`96218ba630144ecb7a314ee332ffd351` — the canonical happy-path hash, also
+byte-identical to run 3's retained `captures-run3/ctype-html.stdout`):
+PDF bytes served under an HTML or octet-stream label, or with the header
+missing, extract exactly like the happy path. Run 3 first measured the
+same three sidecar labels plus `text/plain` (4/4 exit 0, 3241 B, same
+md5). Each row's served header was witnessed independently with
+`curl -s -o /dev/null -D - <url>` (`Content-Type: text/html` etc.;
+`/noctype` and `/garbagenoctype` verified to omit the header entirely).
+Request counts are the sidecar/origin JSONL line deltas per probe window
+(1 HEAD + 1 ranged GET — the 1412 B fixture fits one 64 KiB window).
+
+### Non-PDF bytes — rejected by the parser, identically, under every label
+
+| Probe (run 6) | Probe command (`pdftract-remote extract <url>`) | `Content-Type` served | Wall | Exit | stdout | stderr | Requests |
+|---|---|---|---|---|---|---|---|
+| garbage-pdf | `…/18767/garbage` | `application/pdf` | 49 ms | 1 | 0 B | 133 B | HEAD + 1 GET |
+| garbage-html | `…/18769/garbage/text/html` | `text/html` | 49 ms | 1 | 0 B | 133 B | HEAD + 1 GET |
+| garbage-octet | `…/18769/garbage/application/octet-stream` | `application/octet-stream` | 49 ms | 1 | 0 B | 133 B | HEAD + 1 GET |
+| garbage-noctype | `…/18769/garbagenoctype` | header absent | 50 ms | 1 | 0 B | 133 B | HEAD + 1 GET |
+
+All four stderr captures are byte-identical (md5
+`ac6c99afc9b6f7b42e4a3b52d8fc2daa` — equal to run 3's
+`captures-run3/body-garbage.stderr` and `empty-zeropdf.stderr`):
+
+```text
+$ cat captures-run6-f58e6a06/garbage-html.stderr   # 2146 B of plain text, labeled text/html
+Error: Failed to extract PDF from remote source
+
+Caused by:
+    0: Failed to find startxref offset
+    1: startxref not found in PDF
+```
+
+The label cannot save non-PDF bytes (`application/pdf` + garbage →
+rejected) and cannot doom PDF bytes (`text/html` + fixture → extracted);
+each garbage body is fully fetched first (2 requests in the sidecar logs,
+2146 B served by a range-capable route — the byte count curl-measured, not
+the sidecar docstring's rounded "2000 B") so the rejection is the parse
+phase, not the fetch. This is the content-sniffing answer, from the
+negative side: the binary does not sniff content either — there is no
+magic-byte pre-check, only the parser's structural gate.
+
+### Empty body
+
+| Probe (run 6) | Probe command (`pdftract-remote extract <url>`) | Body | Wall | Exit | stdout | stderr | Requests |
+|---|---|---|---|---|---|---|---|
+| empty-zeropdf | `…/18765/zero.pdf` | 0 B (`Content-Length: 0`) | 9 ms | 1 | 0 B | 133 B | HEAD only |
+| empty-size0 | `…/18767/size/0` | 431 B (minimal valid PDF) | 50 ms | 0 | 542 B | 0 B | HEAD + 1 GET |
+
+`/zero.pdf` (true 0 bytes) fails with the same 133 B `startxref` stderr
+(md5 `ac6c99afc9b6f7b42e4a3b52d8fc2daa`) and is the one route the client
+takes no GET for: the origin JSONL request log records exactly one
+request (`HEAD`) in the probe window, and the HEAD's `Content-Length: 0`
+gives the ranged phase nothing to fetch — zero bytes go straight to the
+parser. A minimal *valid* body of 431 B (`/size/0`) exits 0 with the
+shared ladder md5 `8339e7102033f7c676c2eee3935591fa` (542 B), bounding
+"empty" from below: zero bytes is a parse failure, not a special-cased
+status. (Run 3 measured both routes to the same outcomes.)
+
+### Non-200 statuses — 404 and 500 are surfaced; the error body is never parsed
+
+| Probe (run 6) | Probe command (`pdftract-remote extract <url>`) | Server response (curl witness) | Wall | Exit | stdout | stderr | Requests |
+|---|---|---|---|---|---|---|---|
+| status-404 | `…/18765/404` | `404 Not Found`, `text/plain` body `nope` | 8 ms | 1 | 0 B | 86 B | HEAD only |
+| status-500 | `…/18765/500` | `500 Internal Server Error`, `text/plain` body `boom` | 8 ms | 1 | 0 B | 86 B | HEAD only |
+
+```text
+$ cat captures-run6-f58e6a06/status-404.stderr
+Error: Failed to open remote PDF source
+
+Caused by:
+    HEAD request failed: HTTP 404
+$ cat captures-run6-f58e6a06/status-500.stderr
+Error: Failed to open remote PDF source
+
+Caused by:
+    HEAD request failed: HTTP 500
+```
+
+The status IS surfaced — verbatim (`HTTP 404` / `HTTP 500`) as the cause
+of `Failed to open remote PDF source` — and it aborts the fetch at the
+HEAD phase: one request in the origin JSONL per probe window, no ranged
+GET, so the error body (`nope` / `boom`) is never downloaded or parsed.
+This is a different failure phase from body-validity rejection
+(`Failed to extract PDF from remote source`, post-download) — which is
+how a client can tell "the URL said no" from "the bytes are not a PDF"
+without status-code access. Run 3 first measured 404
+(`captures-run3/ext-404.stderr`, byte-identical to run 6's); 500 is new
+in run 6.
+
+### Why the canonical content-type routes cannot measure this
+
+The canonical harness's content-type routes (`/plain.pdf`, `/octet.pdf`,
+`/notype.pdf`, `/ctype/<TYPE>` on 18765) answer plain `_send(200, …)`
+with no `Accept-Ranges`, so the client refuses them at the HEAD phase
+before any body byte. Run 6 re-confirmed the shape fresh on `/plain.pdf`
+(exit 1, 8 ms, 92 B stderr):
+
+```text
+$ cat captures-run6-f58e6a06/ctl-canonical-plain.stderr
+Error: Failed to download remote PDF
+
+Caused by:
+    Server does not support Range requests
+```
+
+(same text and size as run 1's `captures/ctype-*.stderr`), and the
+origin JSONL shows the single `HEAD /plain.pdf` with no follow-up GET.
+They are routing negative controls, not content-type results; the
+measurement rides the range-capable sidecars.
+
+### Content-type blindness in source
+
+`crates/pdftract-core/src/source/http_range.rs` — the entire remote
+fetch path — contains no content-type reference of any kind (re-checked
+at tag `v1.2.0`, tree HEAD `f4f6d6a8`:
+`grep -n 'content.type\|content_type\|Content-Type'
+crates/pdftract-core/src/source/http_range.rs` → no matches). The
+v1.2.0 tree's only other content-type occurrences are unrelated to
+fetching: the `header` subcommand's header-name validity test
+(`crates/pdftract-cli/src/header.rs:375`), log-redaction policy
+(`crates/pdftract-core/src/log_policy.rs:243,254`), and the SDK's own
+output MIME types (`crates/pdftract-core/src/output/multi.rs:32-33`).
+The header is neither validated nor recorded by the fetch; parsing
+receives raw bytes and applies the PDF structure gate (`startxref`),
+which is the single content gate measured above.
 
