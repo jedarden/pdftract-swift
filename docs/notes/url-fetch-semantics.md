@@ -332,8 +332,8 @@ Measured 2026-09-29 against a local remote-enabled build of the v1.2.0 tag
 `--version` `pdftract 0.1.0`, sha256
 `07f95264e59395a30ae622e42c7bd5f882583a20091a89c3ba665c9f16c48e0d`, scratch
 provenance `~/scratch/pdfswift-1d763709/probe-tmp/bin/` (raw captures
-`connect-probes.rerun.txt`, `read-probes.txt`, `connect-stderr/`,
-`read-stderr/` in the same scratch tree). Method for every probe:
+`connect-probes.attempt1.txt`, `connect-probes.rerun.txt`, `read-probes.txt`,
+`connect-stderr/`, `read-stderr/` in the same scratch tree). Method for every probe:
 `timeout 90 pdftract-remote extract <url>` — the external cap exists so an
 unbounded client hang cannot wedge the probe — wall-clock via `date +%s%3N`,
 stderr captured verbatim, harness `probes/server.py` serving 127.0.0.1:18765
@@ -346,7 +346,7 @@ ranged GET whose body takes ≥ ~10 s is re-issued forever with the error
 swallowed, so `extract` hangs with empty stderr until externally killed.
 There is no effective read/stall timeout.
 **HTTPS:** no timeout is observable — the self-signed-cert rejection ends the
-request in ~8 ms, before any connect or read phase.
+request in ~8–9 ms, before any connect or read phase.
 
 ### Connect phase — HTTP
 
@@ -534,8 +534,17 @@ its compiled-in webpki-roots (ureq 2.12.1 / rustls 0.23.40; no
 rustls-native-certs / native-tls in the lockfile), so `SSL_CERT_FILE` /
 `SSL_CERT_DIR` are inert and the handshake fails before any phase whose
 timeout could be measured — the read-stall phase over TLS is unreachable, not
-merely unmeasured. The 18443 listener itself is healthy (`s_client` completes
-with Verify return code 18).
+merely unmeasured.
+
+Probes run fresh 2026-09-30 against the same binary (sha256
+`07f95264…c48e0d`) and an identically-started harness (`server.py` 18443 TLS,
+method unchanged — `timeout 90` external cap, wall via `date +%s%3N`, stderr
+verbatim); per-probe captures in session scratch
+`~/scratch/pdfswift-0bc0fbd6/captures/`. The listener itself is healthy: an
+`openssl s_client` handshake against 127.0.0.1:18443 completes (capture
+`s_client-18443.txt`), ending `Verify return code: 18 (self-signed
+certificate)`, and the served certificate is byte-identical to the committed
+harness cert `docs/notes/probes/certs/self-signed.pem` (CN=localhost).
 
 ```bash
 timeout 90 pdftract-remote extract https://127.0.0.1:18443/slow/connect/15000
@@ -543,8 +552,15 @@ timeout 90 pdftract-remote extract https://127.0.0.1:18443/slow/body/15000
 timeout 90 pdftract-remote extract https://127.0.0.1:18443/ok.pdf
 ```
 
-Observed: wall 7 / 7 / 8–9 ms respectively, exit 1 in every case — including
-the happy path. stderr identical in all three (verbatim):
+| Probe (2 runs each) | Wall | Exit | stderr |
+|---|---|---|---|
+| `/slow/connect/15000` | 9 / 8 ms | 1 | identical to the verbatim block below (100 bytes) |
+| `/slow/body/15000` | 9 / 9 ms | 1 | identical (100 bytes) |
+| `/ok.pdf` (control) | 9 / 8 ms | 1 | identical (100 bytes) |
+
+stderr (verbatim; byte-identical across all six runs — captures
+`tls_connect_15000_{a,b}.stderr`, `tls_body_15000_{a,b}.stderr`,
+`tls_ok_control_{a,b}.stderr`):
 
 ```
 Error: Failed to open remote PDF source
@@ -553,9 +569,37 @@ Caused by:
     HEAD request failed: connection interrupted
 ```
 
-Cert rejection precedes any connect-phase stall, so no HTTPS timeout value is
-derivable on this harness; the HTTP and HTTPS columns are not comparable
-here.
+First measurement 2026-09-29 agrees: `tls-connect-stall` 7 ms,
+`tls-read-stall` 7 ms, `tls-happy` 8 ms, all exit 1 (probe-tmp captures
+`connect-probes.rerun.txt`, `read-probes.txt`, `smoke-remote-tls.stderr` —
+the same 100-byte stderr).
+
+Trust-knob inertness — pointing the standard OpenSSL env vars at the very
+cert in play changes nothing (captures `tls_ok_sslcertfile.*`,
+`tls_ok_sslcertdir.*`, `tls_connect_sslcertfile.*`):
+
+```bash
+timeout 90 env SSL_CERT_FILE=/home/coding/pdftract-swift/docs/notes/probes/certs/self-signed.pem \
+  pdftract-remote extract https://127.0.0.1:18443/ok.pdf
+timeout 90 env SSL_CERT_DIR=/home/coding/pdftract-swift/docs/notes/probes/certs \
+  pdftract-remote extract https://127.0.0.1:18443/ok.pdf
+timeout 90 env SSL_CERT_FILE=/home/coding/pdftract-swift/docs/notes/probes/certs/self-signed.pem \
+  pdftract-remote extract https://127.0.0.1:18443/slow/connect/15000
+```
+
+Observed: wall 9 / 8 / 9 ms respectively, exit 1 in every case, the same
+100-byte stderr. Across all nine TLS probes the server's JSONL request log
+gained no pdftract line (its only entry is the harness's own curl smoke GET
+`/ok.pdf`): every connection dies at the handshake, before any HTTP request
+is issued.
+
+Cert rejection precedes any connect- or read-phase stall. The listener
+presents its certificate during the accept itself — `probes/server.py:383-385`
+wraps the listening socket server-side, so the TLS handshake completes before
+any route logic can stall (`/slow/connect` would otherwise hold 15 s) — and
+the client fails in ~8–9 ms against that 15 s stall, happy path included. So
+no HTTPS timeout value is derivable on this harness; the HTTP and HTTPS
+columns are not comparable here.
 
 ### Mechanism (source-corroborated, v1.2.0 tree)
 
