@@ -630,3 +630,213 @@ failed: request timeout`), and the TCP-connect phase at ~30 s. Suggested fix
 shape (future work): map body-read timeout to a non-`Interrupted` error kind
 or add a bounded retry with escalation, and consider separating a true
 idle/read timeout from the overall request deadline.
+
+## Redirects (measured, remote-enabled build)
+
+Measured 2026-09-30, two full runs, against the same remote-enabled build as
+[Timeouts](#timeouts-measured-remote-enabled-build) (`pdftract-remote`,
+sha256 `07f95264…c48e0d` re-confirmed unchanged immediately before probing).
+Harness: the canonical `probes/server.py` on 127.0.0.1:18765 (its
+`/r/<N>` exactly-N-redirect 302 chain, `/loop`, `/tlsredir`) plus a
+session sidecar on 127.0.0.1:18766 for the redirect status codes and
+Location shapes the canonical harness lacks —
+
+```bash
+python3 redirect-sidecar.py 18766 sidecar.jsonl \
+  <repo>/docs/notes/probes/fixtures/mini.pdf
+```
+
+(`~/scratch/pdfswift-e1288f7a/redirect-sidecar.py`; serves the same fixture
+bytes at `/fixture.pdf` with canonical `/ok.pdf` semantics — HEAD 200 +
+`Accept-Ranges: bytes`, ranged GET 206 + `Content-Range` / 416 — plus the
+routes `/s301` `/s302` `/s303` `/s307` `/s308` single redirects with a
+relative Location, `/shost` absolute same-host+port, `/xport` absolute
+same-host cross-port, `/xhost` absolute cross-host **and** cross-port,
+`/noloc` a 302 with no Location header; every request JSONL-logged.)
+Harness controls were validated with curl first: `/r/4` under `curl -sL`
+reports `redirects=4 code=200`; each `/sNNN` answers its own status
+unfollowed and lands 200 (1412 fixture bytes) followed; the sidecar's
+`/fixture.pdf` answers `Range: bytes=0-9` with `206 Partial Content`.
+
+Method unchanged: `timeout 90 pdftract-remote extract <url>`, wall via
+`date +%s%3N`, stderr verbatim; 20 probes per run (runner
+`run-redirect-probes.sh`), run twice back-to-back, then re-verified in a
+third full run (`run-redirect-probes-run3.sh`, summary `run3-summary.txt`,
+captures `captures-run3/`): identical exit codes and stdout sizes on all 20
+probes, byte-identical stderr (md5 match on every `err_*.stderr`, run 2 vs
+run 3), and the same server-side walks appended to both JSONL logs
+(`/r/6`→`5,4,3,2` and `/r/32`→`32…28` five-request caps, `/noloc` zero
+follow-ups, `Range: bytes=0-65535` preserved on followed GETs). Raw captures:
+`~/scratch/pdfswift-e1288f7a/` — `captures/out_*.stdout` +
+`captures/err_*.stderr` per probe, both servers' JSONL request logs
+(`http.jsonl`, `sidecar.jsonl`), second-run summary `run2-summary.txt`.
+
+**Verdict — redirects ARE followed, with a hard limit of 4 hops.** A chain
+of 4 redirects extracts fine; the **5th** 3xx response in one request aborts
+it with `Too Many Redirects: reached max redirects (5)` (ureq's default
+budget is 5 but counts the *response* that trips it, so only 4 are ever
+followed — "reached max redirects (5)" after 4 follows). The HEAD request
+and the subsequent ranged GET each get a **fresh, independent budget** and
+re-follow the chain from the original URL. All of 301/302/303/307/308 are
+followed; relative and absolute Locations, cross-port and cross-host alike
+(no same-host restriction); a 3xx **without** a Location header is not
+followed and surfaces as the HEAD status instead. Exceeding the limit is a
+clean exit-1 error in the HEAD phase — no extraction, no retry loop.
+
+### Chain length — bracketing the hop limit
+
+Canonical 302 chain `/r/<N>` = exactly N redirects down to `/ok.pdf`
+(2-run walls; identical exit/stdout across runs):
+
+| Probe | Command | Wall (run 1 / run 2) | Exit | stdout |
+|---|---|---|---|---|
+| no-redirect control | `timeout 90 pdftract-remote extract http://127.0.0.1:18765/ok.pdf` | 54 / 56 ms | 0 | 3241-byte extraction |
+| 1 hop | `… extract http://127.0.0.1:18765/r/1` | 53 / 58 ms | 0 | 3241-byte extraction |
+| 2 hops | `… extract http://127.0.0.1:18765/r/2` | 52 / 56 ms | 0 | 3241-byte extraction |
+| 4 hops | `… extract http://127.0.0.1:18765/r/4` | 53 / 56 ms | 0 | 3241-byte extraction |
+| 5 hops | `… extract http://127.0.0.1:18765/r/5` | 7 / 9 ms | **1** | 0 bytes |
+| 6 hops | `… extract http://127.0.0.1:18765/r/6` | 7 / 9 ms | **1** | 0 bytes |
+| 8 hops | `… extract http://127.0.0.1:18765/r/8` | 7 / 9 ms | **1** | 0 bytes |
+| 16 hops | `… extract http://127.0.0.1:18765/r/16` | 7 / 8 ms | **1** | 0 bytes |
+| 32 hops | `… extract http://127.0.0.1:18765/r/32` | 8 / 9 ms | **1** | 0 bytes |
+| infinite loop | `… extract http://127.0.0.1:18765/loop` | 7 / 9 ms | **1** | 0 bytes |
+
+The bracket is exact: 4 hops succeed (full extraction, ~55 ms), 5 hops fail.
+Chain length above the limit changes nothing — `/r/6` `/r/8` `/r/16`
+`/r/32` and `/loop` all fail at the same 5th response, so there is no
+larger hidden limit and no per-host variation. The 6-hop failure the prior
+attempt observed (`probe-tmp/out_D05-dev-6hops.stderr`,
+[Prior salvage](#prior-salvage-probe-tmp-2026-09-29)) reproduces as real
+behavior here — but for the limit, not the invocation bug that capture
+actually shows (it is a clap `unrecognized subcommand` usage error; the
+capture above is the true 6-hop failure).
+
+Server-side hop evidence (JSONL request log `http.jsonl`, identical across
+both runs) — the client walks the chain on the HEAD and stops after the 5th
+redirect *response*, never reaching the fixture:
+
+| Probe | HEAD-phase requests the server saw | Then |
+|---|---|---|
+| `/r/4` | `HEAD /r/4`, `/r/3`, `/r/2`, `/r/1`, `/ok.pdf` — 4 redirects followed | ranged `GET /r/4` **re-follows all 4 hops** (`GET /r/4 /r/3 /r/2 /r/1 /ok.pdf`) and extracts |
+| `/r/5` | `HEAD /r/5`, `/r/4`, `/r/3`, `/r/2`, `/r/1` — 5 requests, 4 redirects followed | abort on the 5th 302 response; **no `/ok.pdf` request, no ranged GET** |
+| `/r/6` | `HEAD /r/6` … `/r/2` — same 5-request cap | abort; chain never reached `/r/1` |
+| `/r/32` | `HEAD /r/32` … `/r/28` — 5 requests | abort |
+| `/loop` | `HEAD /loop` × 5 | abort |
+
+The `/r/4` row also proves the two budgets are independent: the HEAD
+consumes its full 4-hop budget, and the ranged GET then spends a *fresh*
+budget re-following the same chain from the original URL — a shared budget
+would have failed the second phase. (Corroborated on the sidecar: every
+successful single-status probe shows `HEAD /sNNN → HEAD /fixture.pdf` then
+ranged `GET /sNNN → GET /fixture.pdf` — `sidecar.jsonl` entries 17–40.)
+
+Over-limit stderr, verbatim and byte-identical across all failing probes
+and both runs (md5 `bafc7683…` for `/r/5`; capture
+`captures/err_r5.stderr`):
+
+```
+Error: Failed to open remote PDF source
+
+Caused by:
+    HEAD request failed: http://127.0.0.1:18765/r/5: Too Many Redirects: reached max redirects (5)
+```
+
+(`/loop` differs only in the URL: `…/loop: Too Many Redirects: reached max
+redirects (5)`.) Exit code **1** in every case, ~7–9 ms — the error is
+immediate, there is no backoff and no retry of the over-limit chain.
+
+### Redirect status codes — 301/302/303/307/308 all followed
+
+Sidecar single-hop probes, each `<status> → /fixture.pdf`:
+
+| Probe | Command | Wall (run 1 / 2) | Exit | stdout | Server saw |
+|---|---|---|---|---|---|
+| 301 | `timeout 90 pdftract-remote extract http://127.0.0.1:18766/s301` | 55 / 60 ms | 0 | 3241-byte extraction | `HEAD /s301 → HEAD /fixture.pdf`, ranged `GET /s301 → GET /fixture.pdf` |
+| 302 | `… extract http://127.0.0.1:18766/s302` | 53 / 57 ms | 0 | 3241-byte extraction | same shape |
+| 303 | `… extract http://127.0.0.1:18766/s303` | 53 / 60 ms | 0 | 3241-byte extraction | same shape |
+| 307 | `… extract http://127.0.0.1:18766/s307` | 53 / 61 ms | 0 | 3241-byte extraction | same shape |
+| 308 | `… extract http://127.0.0.1:18766/s308` | 52 / 60 ms | 0 | 3241-byte extraction | same shape |
+
+No status is distinguishable from another for this client: HEAD is
+preserved through every one of them (the server logs `HEAD`, never a
+converted `GET`, at the redirect target), and every status yields the
+identical full extraction. The 302-only canonical chain probes agree.
+
+### Location shapes — relative, absolute, cross-port, cross-host: all followed
+
+| Probe | Location emitted | Command | Exit | Server saw |
+|---|---|---|---|---|
+| relative (control) | `Location: /ok.pdf` (canonical `/r/1`) | `… extract http://127.0.0.1:18765/r/1` | 0 | walk + extraction |
+| absolute, same host+port | `Location: http://127.0.0.1:18766/fixture.pdf` (`/shost`) | `… extract http://127.0.0.1:18766/shost` | 0 | `HEAD /shost → HEAD /fixture.pdf`, ranged GET likewise |
+| absolute, cross-port | `Location: http://127.0.0.1:18765/ok.pdf` (`/xport`) | `… extract http://127.0.0.1:18766/xport` | 0 | sidecar got only `HEAD /xport` + ranged `GET /xport`; the follow-ups landed as `HEAD /ok.pdf` + ranged `GET /ok.pdf` in `http.jsonl` |
+| absolute, cross-host + cross-port | `Location: http://localhost:18765/ok.pdf` (`/xhost`, requested as `127.0.0.1:18766`) | `… extract http://127.0.0.1:18766/xhost` | 0 | same split: follow-ups logged by the canonical server |
+| absolute, same host (`/tlsredir` on the plain port) | `Location: http://127.0.0.1:18765/ok.pdf` | `… extract http://127.0.0.1:18765/tlsredir` | 0 | `HEAD /tlsredir → HEAD /ok.pdf`, ranged `GET /tlsredir → GET /ok.pdf` |
+
+**No same-host restriction exists**: a redirect to a different host string
+*and* port is followed exactly like a same-host one (both run 1 and run 2,
+exit 0, full 3241-byte extraction — 53–58 ms). Header preservation across
+the hop is observable in the same logs: the post-redirect ranged GET still
+carries `Range: bytes=0-65535` (`sidecar.jsonl` entries 20, 24, 28, 32,
+36, 40) — the Range source survives the redirect rather than restarting.
+
+HTTPS variants are not runnable on this harness, not merely unmeasured: by
+the [TLS findings](#tls--connect-and-read-phases) the handshake dies before
+any HTTP request, so an `https://` redirect source (and the
+https→http downgrade `/tlsredir` is built to exercise) cannot be probed
+with the self-signed listener.
+
+Negative control — 302 **without** a Location header
+(`/noloc`; `… extract http://127.0.0.1:18766/noloc`): wall 6 / 9 ms,
+exit **1**, zero requests beyond the initial HEAD in `sidecar.jsonl`
+(entry 45 — no follow-up request), stderr verbatim:
+
+```
+Error: Failed to open remote PDF source
+
+Caused by:
+    HEAD request failed with status 302
+```
+
+So the client does not treat 3xx as terminal-success-with-empty-body nor
+loop on it: a Location-less 3xx is surfaced as a plain failed-HEAD status
+error, same shape as any non-200.
+
+### Mechanism (source-corroborated, ureq 2.12.1 + v1.2.0 tree)
+
+- `crates/pdftract-core/src/source/http_range.rs:131-133` builds the
+  ranged-path agent as `AgentBuilder::new().timeout(…).build()` — **no
+  `.redirects()` override**, so ureq 2.12.1's default applies.
+- ureq 2.12.1 `src/agent.rs:262` — default `redirects: 5`.
+- ureq 2.12.1 `src/unit.rs:164-172` (`connect`, the redirect loop): before
+  following, `if history.len() + 1 >= redirects { return Err(ErrorKind::TooManyRedirects.msg(format!("reached max redirects ({})", …))) }` —
+  with `redirects: 5` the check fires when the **5th** 3xx response arrives
+  (`history.len()` is 4), so exactly 4 redirects are ever followed and the
+  error text names the raw budget, 5 — precisely the observed bracket
+  (`/r/4` exit 0, `/r/5` exit 1) and the observed `reached max redirects
+  (5)` wording.
+- ureq 2.12.1 `src/error.rs:411` — `ErrorKind::TooManyRedirects` displays
+  as `Too Many Redirects`, which is why the surfaced cause reads
+  `<url>: Too Many Redirects: reached max redirects (5)` (the URL prefix is
+  ureq's `Error` Display, `src/error.rs:229-230`; the
+  `HEAD request failed:` wrapper is pdftract's
+  `classify_http_error`, as in every other HEAD-phase failure above).
+- ureq 2.12.1 `src/unit.rs:189-201` — method choice on redirect:
+  301/302/303 keep `GET`/`HEAD` as-is; 307/308 keep the method for the
+  GET/HEAD/OPTIONS/TRACE family. The probe client only ever sends
+  HEAD/GET, so every followed status re-issues the same method — matching
+  the observed identical handling of all five statuses.
+- ureq 2.12.1 `src/unit.rs:216-224` — on redirect the previous header vec
+  is reused minus `content-length` and `cookie` (and `authorization` per
+  the default `RedirectAuthHeaders::Never` policy, `agent.rs:20-23`);
+  everything else — `Range` included — is re-sent. Source-derived for
+  `authorization` (not probed here); `Range` survival is directly observed
+  in `sidecar.jsonl` above.
+
+**SDK-mirroring consequence:** a Swift client claiming pdftract
+compatibility must follow redirects — 301/302/303/307/308, relative or
+absolute, cross-host allowed — but stop after **4** followed hops per
+request with an error equivalent to `Too Many Redirects: reached max
+redirects (5)` (exit 1, no partial output), keep HEAD as HEAD on every
+followed status, re-follow the chain independently for the ranged GET, keep
+the `Range` header across hops, and reject a 3xx lacking `Location` as a
+plain `<status>` HEAD failure.
