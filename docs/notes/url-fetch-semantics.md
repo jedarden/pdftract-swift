@@ -497,6 +497,36 @@ trickling continuously at 100 ms/byte was still cut at 10.0 s per attempt; an
 idle-gap read timeout would have let the transfer complete at ~20 s. It never
 does ⇒ the deadline is total-time, not idle-based.
 
+### Read-phase re-verification (2026-09-30)
+
+All four read-phase probes — `/slow/body/15000`, `/slow/body/5000`, `/hang`,
+`/rangetrickle/20` — re-run fresh on 2026-09-30 against the same binary
+(sha256 `07f95264…c48e0d` re-confirmed unchanged, so the 2026-09-29 evidence
+above is in force) and an identically-started harness (`server.py` 18765,
+JSONL log and per-probe captures in session scratch
+`~/scratch/pdfswift-b78b894b/`, ports pre-cleared, method unchanged —
+`timeout 90` external cap, wall via `date +%s%3N`, stderr verbatim).
+Baseline `/ok.pdf` control: 107 ms, exit 0, empty stderr, 3241-byte
+extraction. Values reproduce:
+
+| Probe | Fresh wall | Exit | stderr | Server-log request sequence |
+|---|---|---|---|---|
+| `/slow/body/15000` | 90005 / 90011 ms | 124 (external cap) | **EMPTY (0 bytes)** | HEAD instant, then the identical ranged GET (`Range: bytes=0-65535`) 9× per run (initial + 8 re-issues) at +10.10–10.28 s spacing, no backoff, until the kill |
+| `/slow/body/5000` | 5011 / 5012 ms | 0 | empty, 3241-byte extraction | HEAD + exactly one ranged GET; the full 5.02 s stall survived (next request 5.018 s after the HEAD) |
+| `/hang` | 10352 / 10438 ms | 1 | identical to the verbatim block above | exactly one HEAD, no retry — the HEAD-phase deadline surfaced cleanly; next request 10.36 / 10.44 s after it |
+| `/rangetrickle/20` | 90004 / 90011 ms | 124 (external cap) | **EMPTY (0 bytes)** | HEAD instant, ranged GET 9× per run (initial + 8 re-issues) at +10.00–10.02 s spacing, the continuously-trickling body cut mid-transfer every time |
+
+Across runs: `/slow/body/15000` 90004 / 90005 / 90011 ms and
+`/rangetrickle/20` 90003 / 90004 / 90011 ms, all exit 124 with 0-byte stderr;
+`/slow/body/5000` 5011 / 5012 (fresh) vs 5016 ms, exit 0; `/hang` 10352 /
+10438 (fresh) vs 10243 ms, exit 1. The read-phase findings stand: the ~10 s
+agent deadline bounds the HEAD cleanly but never bounds a stalled or slow
+ranged-GET body — the request is re-issued forever with the error swallowed
+(unbounded `Interrupted`-retry, empty stderr), so the external 90 s cap, not
+any client deadline, ends the process; and the continuously-trickling 206
+transfer is still cut at ~10 s per attempt, confirming total-time rather than
+idle-gap semantics.
+
 ### TLS — connect and read phases
 
 TLS unusable with self-signed; timeout not observable. The binary trusts only
