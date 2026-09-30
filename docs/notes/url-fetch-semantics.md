@@ -11,7 +11,11 @@ No released pdftract build can perform a remote fetch today (see
 [Timeouts](#timeouts-measured-remote-enabled-build) used a local
 `--features remote` build of the same v1.2.0 tag. The harness below is
 verified end-to-end with curl, and the `.url` probes against the
-remote-enabled build are recorded in that section.
+remote-enabled build are recorded in the measured sections below
+([Timeouts](#timeouts-measured-remote-enabled-build),
+[TLS verification](#tls-verification-measured-remote-enabled-build),
+[Proxy handling](#proxy-handling-measured-remote-enabled-build),
+[Redirects](#redirects-measured-remote-enabled-build)).
 
 ## Probe harness
 
@@ -840,3 +844,279 @@ redirects (5)` (exit 1, no partial output), keep HEAD as HEAD on every
 followed status, re-follow the chain independently for the ranged GET, keep
 the `Range` header across hops, and reject a 3xx lacking `Location` as a
 plain `<status>` HEAD failure.
+
+## TLS verification (measured, remote-enabled build)
+
+Measured 2026-09-30 against the same remote-enabled build as
+[Timeouts](#timeouts-measured-remote-enabled-build) and
+[Redirects](#redirects-measured-remote-enabled-build) (`pdftract-remote`,
+sha256 `07f95264…c48e0d` — full hash in `captures/binary-identity.txt` and
+`captures-cd7d7321/binary-identity.attempt3.txt`, re-confirmed unchanged
+2026-09-30 by `captures-bfafd83c/run-output.txt`; each probe run's console
+header re-prints the 16-char prefix `07f95264e59395a3`,
+`captures-r3/runA-runB-C-console.txt`).
+Harness: the canonical `probes/server.py` listeners on 127.0.0.1:18765
+(plain) and 127.0.0.1:18443/18444/18455 (TLS, self-signed / expired /
+hostname-mismatch certs from `probes/certs/`), plus `probes/proxy.py` on
+127.0.0.1:18888 (used by [Proxy handling](#proxy-handling-measured-remote-enabled-build));
+the r3 harness ran the repo's own `docs/notes/probes/server.py` — its
+bind-failure traceback for 18455 names that exact path
+(`captures-r3/srv-mi.out`).
+Method for every probe (`captures-r3/run-probes.sh`): a clean proxy env (all
+eight `*_PROXY`/`NO_PROXY` variants unset) + `timeout 90 pdftract-remote
+extract <url>`, wall via `date +%s%3N`, stdout/stderr captured per probe, and
+the server-side JSONL request logs diffed around each probe.
+
+Two full probe runs (A, B) were executed against a freshly started harness
+each, plus a dedicated two-round mismatch re-run (C1, C2, first-party
+listener, fresh log) after a harness-hygiene defect was found and fixed:
+throughout runs A/B the 18455 listener was an untracked orphan, not the
+harness's own — the r3 harness's mismatch listener failed to bind
+(`captures-r3/srv-mi.out`, `OSError: [Errno 98] Address already in use`)
+because a python3 pid outside every recorded pid set (140287, per the
+`ss -ltnp` cross-check in `captures-r3/runA-runB-C-console.txt`; r1 `pid-mi`
+45700, r2 `pid-mi2` 95188 — that one already dead on a wrong script path,
+`captures-r2/server-mi2.out`) held the port. The pre-r3 cleanup scan had
+grepped listeners with `1844[345]` — a pattern that cannot match `18455` —
+and reported the port free, which is how the orphan escaped detection. The
+port was cleared, a first-party listener started (`pid-mi`, fresh log), and
+the mismatch probes re-run; the stderr of all four rounds is byte-identical
+(md5 below) and neither server logged any request during its probes (below),
+so the A/B mismatch rows stand on their own evidence. Raw captures:
+`~/scratch/pdfswift-4c4d046f/captures-r3/` (`{A,B,C1,C2}_<probe>.out/.stderr`,
+server logs `origin.jsonl`, `tls-ss.jsonl`, `tls-ex.jsonl`, `tls-mi.jsonl`,
+`proxy.jsonl`; run-A copies kept as `*.runA.jsonl`; run B and C1/C2 console
+records in `runA-runB-C-console.txt`). An earlier run of the same bead
+(`~/scratch/pdfswift-4c4d046f/captures/`) independently matches: same
+100-byte stderr on all three conditions, zero non-curl entries in any TLS
+server log, zero pdftract entries in the proxy log (verified by reading
+`captures/tls-*.jsonl` and `captures/proxy.jsonl`).
+
+**Verdict — verification is strict and immutable: every non-publicly-trusted
+chain is rejected at the TLS handshake, before any HTTP request is issued,
+and the failure is reported as one undifferentiated error regardless of
+cause.** Self-signed (untrusted root), expired, and hostname-mismatch certs
+are all rejected; a publicly-trusted certificate is accepted and extracts
+normally. There is no knob: the trust store is the compiled-in webpki-roots
+(ureq 2.12.1 / rustls 0.23.40; no `rustls-native-certs` / `native-tls` in
+the v1.2.0 `Cargo.lock`), and the standard `SSL_CERT_FILE` / `SSL_CERT_DIR` env vars are
+inert (measured in [TLS — connect and read phases](#tls--connect-and-read-phases)).
+
+### The three certificates (probes/certs/, characterized fresh 2026-09-30)
+
+`openssl x509` via docker (`docker run --rm -v probes/certs:/certs
+swift:5.10-jammy openssl x509 …` — the lab host's openssl CLI is broken):
+
+| Cert | Subject = Issuer | Validity | SANs |
+|---|---|---|---|
+| `self-signed.pem` | `CN=localhost` | 2026-09-29 → 2026-10-01 (current) | `DNS:localhost, IP Address:127.0.0.1` |
+| `expired.pem` | `CN=localhost` | expired 2021-01-01 | `DNS:localhost, IP Address:127.0.0.1` |
+| `mismatch.pem` | `CN=wrong.example.com` | 2026-09-29 → 2026-10-01 (current) | `DNS:wrong.example.com` only |
+
+So name matching is exercisable independently of trust/expiry: the self-signed
+and expired certs carry SANs matching both target spellings (`127.0.0.1` IP
+SAN and `localhost` DNS SAN), while the mismatch cert matches neither —
+probed against both `https://127.0.0.1:18455` (IP literal) and
+`https://localhost:18455` (DNS name), both of which mismatch.
+
+### Listener health and verification-failure controls (curl)
+
+Each listener serves the fixture when verification is bypassed, and fails it
+in exactly its own intended way otherwise (curl 8.14.1, run 2026-09-30;
+`P=docs/notes/probes`):
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://127.0.0.1:18443/ok.pdf                     # exit 60 (untrusted root, system trust)
+curl -s --cacert $P/certs/self-signed.pem -o /dev/null -w '%{http_code}\n' https://127.0.0.1:18443/ok.pdf   # 200 — pinning makes it its own anchor
+curl -s --cacert $P/certs/expired.pem     -o /dev/null -w '%{http_code}\n' https://127.0.0.1:18444/ok.pdf   # exit 60 (certificate has expired)
+curl -sk -o /dev/null -w '%{http_code}\n' https://127.0.0.1:18444/ok.pdf                                     # 200
+curl -s --cacert $P/certs/mismatch.pem    -o /dev/null -w '%{http_code}\n' https://127.0.0.1:18455/ok.pdf    # exit 60 (no SAN matches)
+curl -s --cacert $P/certs/mismatch.pem    -o /dev/null -w '%{http_code}\n' https://localhost:18455/ok.pdf    # exit 60
+curl -sk -o /dev/null -w '%{http_code}\n' https://127.0.0.1:18455/ok.pdf                                     # 200
+```
+
+Observed: `000/exit=60`, `200/exit=0`, `000/exit=60`, `200/exit=0`,
+`000/exit=60`, `000/exit=60`, `200/exit=0`. The listeners are healthy and the
+certs fail verification for their own reasons; any pdftract rejection below is
+therefore attributable to certificate verification, not a broken endpoint.
+Captured evidence: the pinned and `-k` rows verbatim in
+`captures/curl-sanity.txt` (the earlier run against the same repo cert trio),
+the default-trust row in `captures-cd7d7321/curl-controls.attempt3.txt`
+(control 4, `000`/`exit=60`), and all seven rows re-confirmed 2026-09-30 in
+`captures-bfafd83c/run-output.txt` + `controls-pass2.txt` — which additionally
+pin the *served* certs of the later-regenerated harness, isolating each cause
+cleanly (`pin-served-ss` 200/exit=0: pinning removes the untrusted-root
+failure; `pin-served-expired` 000/exit=60: expiry alone; `pin-served-mi-ip`
+and `pin-served-mi-host` 000/exit=60: name mismatch alone, trust and validity
+being correct).
+
+### Probe results — all three conditions rejected, identically
+
+```bash
+env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy \
+    -u all_proxy -u NO_PROXY -u no_proxy \
+    timeout 90 pdftract-remote extract https://127.0.0.1:18443/ok.pdf   # self-signed
+#   … https://localhost:18443/ok.pdf / https://127.0.0.1:18444/ok.pdf   # expired
+#   … https://localhost:18444/ok.pdf / https://127.0.0.1:18455/ok.pdf   # mismatch
+#   … https://localhost:18455/ok.pdf
+```
+
+| Condition | Target | Wall run A / run B (ms) | Exit | stdout | stderr |
+|---|---|---|---|---|---|
+| self-signed (untrusted root) | `https://127.0.0.1:18443/ok.pdf` | 10 / 9 | **1** | 0 B | 100 B |
+| self-signed | `https://localhost:18443/ok.pdf` | 11 / 9 | **1** | 0 B | 100 B |
+| expired | `https://127.0.0.1:18444/ok.pdf` | 9 / 8 | **1** | 0 B | 100 B |
+| expired | `https://localhost:18444/ok.pdf` | 10 / 9 | **1** | 0 B | 100 B |
+| hostname mismatch | `https://127.0.0.1:18455/ok.pdf` | 9 / 8 (A/B) + 9 / 9 (C1/C2) | **1** | 0 B | 100 B |
+| hostname mismatch | `https://localhost:18455/ok.pdf` | 9 / 8 (A/B) + 9 / 9 (C1/C2) | **1** | 0 B | 100 B |
+| **publicly-trusted control** | `https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf` | 102 / 70 | **0** | 1216 B | 0 B |
+
+Sources for the wall column: verbatim run A / run B / C1 / C2 console records
+in `captures-r3/runA-runB-C-console.txt` (the r3 console output was not
+originally saved to disk; the file is a labeled verbatim extract of the
+parent session transcript, with the per-probe stdout/stderr files having been
+on disk all along), cross-checked against the on-disk captures (`{A,B}_*`
+sizes and stderr md5 match every row). All probes were independently
+re-measured 2026-09-30 against the standing harness in
+`captures-bfafd83c/run-output.txt`: same exits, stdout/stderr sizes and md5s,
+walls 8–10 ms (rejected), 107 ms (public control), 53–73 ms (proxy rows).
+
+stderr is byte-identical across **all 16 bad-cert runs** (md5
+`007483650c299f988786821cf358d211`), verbatim:
+
+```
+Error: Failed to open remote PDF source
+
+Caused by:
+    HEAD request failed: connection interrupted
+```
+
+Server-side evidence that the rejection precedes any HTTP: in run B **no TLS
+listener log existed at all** — run B started against a fresh harness whose
+JSONL logs are created lazily on first request (`server.py:187` appends per
+request; the run-B console shows the log-delta helper erroring `No such file
+or directory` on `tls-ss.jsonl`/`origin.jsonl`/`proxy.jsonl` at start, and
+its `mv` of `tls-mi.jsonl` failing the same way) and the probes never created
+one. The `tls-ss/ex/mi.jsonl` files now in `captures-r3/` were created only
+by the post-C2 curl control pass — a single `curl/8.14.1` entry each at
+`t=1790737210`, zero ureq entries — and the C-round's own check recorded
+verbatim: `tls-mi.jsonl never created — zero HTTP requests reached the
+listener` (`captures-r3/runA-runB-C-console.txt`). In run A the TLS logs
+exist from the harness's own startup curl controls and contain only
+`curl/8.14.1` entries (`tls-ss.runA.jsonl`: 3, `tls-ex.runA.jsonl`: 2) —
+zero pdftract/ureq lines — and the orphan's log (`captures-r2/tls-mi2.jsonl`)
+has exactly four `curl/8.14.1` entries (22:44:26, 22:53:50 ×2, 22:57:36
+local), none inside either probe window (run A from 02:54:36Z, run B from
+02:55:24Z). Combined with the ~8–11 ms wall (far below the same harness's
+own plain-HTTP round trips, 53–107 ms in these very tables, and far below
+every measured pdftract timeout), the client dies inside the TLS
+handshake: the server presents its certificate during the accept
+(`probes/server.py:383-385` wraps the listening socket), rustls rejects the
+chain/name, and ureq surfaces the handshake failure as its generic transport
+error `connection interrupted` — the same text already recorded for every
+TLS case in [TLS — connect and read phases](#tls--connect-and-read-phases).
+
+The publicly-trusted control proves the rejections are verification working,
+not TLS broken: against `www.w3.org`'s publicly-trusted chain the client
+handshakes, fetches, and extracts normally (exit 0, 1216-byte extraction,
+page text `Dummy PDF file`, 102 / 70 ms — capture `A_tls-public.out`).
+
+**Cause is not distinguishable from the outside.** Untrusted root, expired,
+and wrong-name all produce the identical 100-byte stderr and exit 1. A Swift
+SDK mirroring pdftract can assert *rejection* and *exit 1* for all three
+conditions, but must not promise cause-specific error text: the observable
+contract is `Failed to open remote PDF source / HEAD request failed:
+connection interrupted`, pre-HTTP, with no request ever reaching the origin.
+
+## Proxy handling (measured, remote-enabled build)
+
+Measured 2026-09-30, same binary (sha256 `07f95264…c48e0d`), same harness
+and method as [TLS verification](#tls-verification-measured-remote-enabled-build)
+(two full runs A/B; captures in `~/scratch/pdfswift-4c4d046f/captures-r3/`).
+The mock proxy is the harness's logging forward proxy `probes/proxy.py` on
+127.0.0.1:18888: it logs every absolute-form request and CONNECT it receives
+and answers origin-form (non-proxy-shaped) requests with 400. It was proven
+working immediately before probing, with curl explicitly configured:
+
+```bash
+curl -sx http://127.0.0.1:18888 -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18765/ok.pdf   # 200; "forward" entry in proxy.jsonl
+curl -sx http://127.0.0.1:18888 --cacert probes/certs/self-signed.pem \
+     -o /dev/null -w '%{http_code}\n' https://127.0.0.1:18443/ok.pdf                             # 200; "connect" entry in proxy.jsonl
+```
+
+Captured: run A's log copy `captures-r3/proxy.runA.jsonl` holds exactly those
+two entries — `"type": "forward"` and `"type": "connect"`, `User-Agent:
+curl/8.14.1`, `t=1790736830.92/.93` — and the earlier run's
+`captures/proxy.jsonl` the same pair; re-confirmed 2026-09-30 against the
+standing harness (`captures-cd7d7321/curl-controls.attempt3.txt` controls
+9–10: forward 200, CONNECT 200, fresh entries appended;
+`captures-bfafd83c/run-output.txt` c8/c9 and `controls-pass2.txt`).
+
+Probe command shape as above (`env -u …` clean proxy env, `timeout 90`,
+`pdftract-remote extract <url>`), with one proxy variable added per probe;
+the `DEAD` proxy address `http://127.0.0.1:18999` has no listener.
+
+**Verdict — every proxy environment variable is ignored entirely; the fetch
+always connects directly to the origin, and `NO_PROXY` is vacuous.**
+
+| Env added | Target | Exit | Wall A / B (ms) | stdout | Origin log (18765) | Proxy log (18888) |
+|---|---|---|---|---|---|---|
+| none (baseline) | `http://127.0.0.1:18765/ok.pdf` | 0 | 54 / 54 | 3241 B | +2: direct ureq `HEAD`+`GET` | +0 |
+| `HTTP_PROXY=http://127.0.0.1:18888` | same | 0 | 54 / 53 | 3241 B | +2 direct | +0 |
+| `http_proxy=…` (lowercase) | same | 0 | 54 / 53 | 3241 B | +2 direct | +0 |
+| `HTTPS_PROXY=…` | same (plain-http URL) | 0 | 55 / 53 | 3241 B | +2 direct | +0 |
+| `ALL_PROXY=…` | same | 0 | 54 / 54 | 3241 B | +2 direct | +0 |
+| `all_proxy=…` (lowercase) | same | 0 | 54 / 54 | 3241 B | +2 direct | +0 |
+| `HTTP_PROXY=http://127.0.0.1:18999` (dead) | same | 0 | 54 / 53 | 3241 B | +2 direct | +0 (unreachable anyway) |
+| `ALL_PROXY=http://127.0.0.1:18999` (dead) | same | 0 | 54 / 53 | 3241 B | +2 direct | +0 |
+| `HTTP_PROXY=…:18888` + `NO_PROXY=127.0.0.1` | same | 0 | 54 / 54 | 3241 B | +2 direct | +0 |
+| `HTTPS_PROXY=…:18888` | `https://127.0.0.1:18443/ok.pdf` | 1 | 9 / 9 | 0 B | — | **+0 (no CONNECT)** |
+| `HTTP_PROXY=…:18888` | same https URL | 1 | 9 / 9 | 0 B | — | +0 |
+| `ALL_PROXY=…:18888` | same https URL | 1 | 9 / 9 | 0 B | — | +0 |
+| `HTTP_PROXY=…:18888` + `NO_PROXY=127.0.0.1` | same https URL | 1 | 8 / 9 | 0 B | — | +0 |
+
+Wall column sources as in
+[TLS verification](#tls-verification-measured-remote-enabled-build):
+`captures-r3/runA-runB-C-console.txt` (runs A/B consoles) plus the
+independent 2026-09-30 re-measurement in `captures-bfafd83c/run-output.txt`
+(same exits/sizes/md5s; walls 53–73 ms plain rows, 8–9 ms https rows).
+
+Routing evidence, per row: the origin server's JSONL gained exactly one
+`User-Agent: ureq/2.12.1` pair (`HEAD /ok.pdf`, then `GET /ok.pdf` with
+`Range: bytes=0-65535`) for each successful plain-HTTP probe — run B's
+`origin.jsonl` ends with exactly 18 entries, all ureq, 9× HEAD + 9× GET,
+matching the nine plain-HTTP probes one-for-one — while the proxy's log
+**was never even created** during run B (zero traffic of any kind reached
+18888, including the curl sanity entries, which lived only in run A's log).
+The `+2 direct` pattern is identical with a live proxy, a dead proxy, and no
+proxy at all: a client honoring `HTTP_PROXY` would have logged an
+absolute-form request on 18888, and a client honoring the dead-proxy rows
+could not have succeeded at all (nothing listens on 18999 — success there is
+the strongest single datapoint). For the HTTPS rows the mock proxy log is the
+only routing witness (the TLS listener can never log — every handshake dies,
+per [TLS verification](#tls-verification-measured-remote-enabled-build)): no
+CONNECT was ever logged under any proxy variable, so those requests were not
+proxied; they failed as the usual direct self-signed rejection (the same
+100-byte `connection interrupted` stderr, md5 `007483650c…`).
+`NO_PROXY=127.0.0.1` changes nothing in either direction — there is no
+proxying to bypass.
+
+Source corroboration (v1.2.0 tree): the ranged-path agent is built with
+`ureq::AgentBuilder::new().timeout(...).build()` and nothing else
+(`crates/pdftract-core/src/source/http_range.rs:131-133`); `.proxy(` appears
+nowhere in either crate (the only "proxy" hits are log-redaction/hop-by-hop
+header lists and `serve` deployment docs), so ureq 2.12.1 — which uses a proxy only when
+one is explicitly set on the agent, and never reads the environment on its
+own — connects directly. The `socks-proxy` feature flag is enabled on the
+cli crate's *dev*-dependency `ureq`
+(`crates/pdftract-cli/Cargo.toml:170`) but no `Proxy` is ever constructed, so
+it changes nothing observable.
+
+**SDK-mirroring consequence:** a Swift client claiming pdftract compatibility
+must NOT honor `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` (either case) for
+`.url` sources: pdftract connects directly to the origin whatever the
+environment says, ignores `NO_PROXY` (there is nothing to bypass), and offers
+no proxy configuration. TLS verification meanwhile is strict, anchored in the
+compiled-in webpki-roots, immune to `SSL_CERT_FILE`/`SSL_CERT_DIR`, and
+fails pre-HTTP with a single cause-free error for untrusted, expired, and
+wrong-name certificates alike.
