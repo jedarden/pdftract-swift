@@ -214,6 +214,71 @@ on success. The modes the script does not automate — `/tlsredir`, `/stall`,
 routes, `/echo`, and the blackhole connect hang — are covered by the per-mode
 curl one-liners above.
 
+### Harness readiness — timeout-probe foundation (re-verified 2026-09-30)
+
+The five routes the timeout probes depend on were re-exercised fresh on
+2026-09-30 and the probe binary re-confirmed, before any further probe work.
+No timeout claims are (re)made here — [Timeouts](#timeouts-measured-remote-enabled-build)
+remains the measured record. Session raw captures:
+`~/scratch/pdfswift-dc382d4c/` (`captures.txt`, `verify-harness.out`,
+server JSONL logs, probe-binary outputs).
+
+Server started exactly as documented above (plain listener 18765, TLS
+listener 18443, JSONL logs in the session scratch dir; ports pre-cleared of
+the previous session's listeners). Each control below is verbatim; `curl`
+exit codes quoted are curl's.
+
+| Route | Control command (run from `probes/`) | Observed |
+|---|---|---|
+| `/ok.pdf` | `curl -sD- -o /dev/null http://127.0.0.1:18765/ok.pdf` | `HTTP/1.1 200 OK`, `Content-Length: 1412`, `Content-Type: application/pdf`, `Accept-Ranges: bytes`, exit 0 |
+| `/ok.pdf` ranged | `curl -sD- -o /dev/null -H 'Range: bytes=0-99' http://127.0.0.1:18765/ok.pdf` | `HTTP/1.1 206 Partial Content`, `Content-Range: bytes 0-99/1412`, 100-byte body, exit 0 |
+| `/slow/connect/1500` | `curl -s -o /dev/null -w 'conn=%{time_connect} ttfb=%{time_starttransfer} total=%{time_total} code=%{http_code}\n' http://127.0.0.1:18765/slow/connect/1500` | `conn=0.000063 ttfb=1.500585 total=1.500608 code=200`, exit 0 — connect instant, TTFB carries the knob |
+| `/slow/body/1500` | `curl -s -o /dev/null -w 'ttfb=%{time_starttransfer} total=%{time_total} code=%{http_code}\n' http://127.0.0.1:18765/slow/body/1500` | `ttfb=0.000478 total=1.500670 code=200`, exit 0 — headers+first byte instant, total carries the knob |
+| `/hang` | `curl -s --max-time 2 -o /dev/null -w 'code=%{http_code} size=%{size_download}\n' http://127.0.0.1:18765/hang` | `code=000 size=0`, exit 28 — no response byte ever arrives |
+| `/rangetrickle/1` | `curl -s -o /dev/null -D- -w 'size=%{size_download} total=%{time_total} code=%{http_code}\n' http://127.0.0.1:18765/rangetrickle/1` | `200`, `Content-Length: 10`, `Accept-Ranges: bytes`, `size=10 total=0.902197`, exit 0 — the 1 byte/100 ms pacing |
+| `/rangetrickle/1` slice | `curl -s -o /dev/null -D- -w 'size=%{size_download} total=%{time_total}\n' -H 'Range: bytes=0-4' http://127.0.0.1:18765/rangetrickle/1` | `206`, `Content-Range: bytes 0-4/10`, `size=5 total=0.401032`, exit 0 — the slice trickles at the same rate |
+
+Full harness check re-run the same session: `bash verify-harness.sh` →
+exit 0, 44 `PASS` lines, `== summary: 0 failure(s) ==` / `ALL CHECKS PASSED`,
+including all four range-capable timeout routes (`/ok.pdf`, `/slow/connect`,
+`/slow/body`, `/rangetrickle`) answering a ranged GET `206` on both the
+plain and TLS listeners. (`/hang` is in the script's non-automated set; the
+curl control above covers it.)
+
+#### Probe binary re-confirmation (2026-09-30)
+
+| Check | Command | Observed |
+|---|---|---|
+| sha256 | `sha256sum ~/scratch/pdfswift-1d763709/probe-tmp/bin/pdftract-remote` | `07f95264e59395a30ae622e42c7bd5f882583a20091a89c3ba665c9f16c48e0d` — identical to the 2026-09-29 record, so the binary is reused unchanged |
+| Version | `pdftract-remote --version` | `pdftract 0.1.0`, exit 0 |
+| Remote-enabled (functional) | `timeout 90 pdftract-remote extract http://127.0.0.1:18765/ok.pdf` | exit 0, 3241-byte JSON extraction, empty stderr |
+| Released-binary negative control | `sha256sum` + `timeout 90 …/pdfswift-25c6467c/pdftract-v1.2.0-x86_64-unknown-linux-musl/pdftract extract http://127.0.0.1:18765/ok.pdf` | sha256 `54d47f04185be96481638f7a414c68e8a533e5b795a1f841384df4326aa25481`, exit 2, `Error: Remote sources require the 'remote' feature to be enabled` — confirmed unusable for fetch probes |
+
+Provenance of the probe binary (corroborated 2026-09-30):
+
+- Source tree `~/scratch/pdfswift-1d763709/probe-tmp/pdftract-v120-src` sits
+  at commit `f4f6d6a81063492eee2150307efd493e5c4426ea` (`git rev-parse HEAD`;
+  `git describe --tags` → `v1.2.0`, clean — on the tag).
+- That commit is the *published* tag: `git ls-remote
+  https://github.com/jedarden/pdftract refs/tags/v1.2.0^{}` →
+  `f4f6d6a81063492eee2150307efd493e5c4426ea` (GitHub mirror of the Forgejo
+  source of truth).
+- The tag tree carries the feature: `remote = ["dep:ureq",
+  "pdftract-core/remote"]` (`crates/pdftract-cli/Cargo.toml:133`).
+- The binary is consistent with that tree: `strings` on it shows the crate's
+  own paths (`crates/pdftract-cli/src/codegen.rs`,
+  `crates/pdftract-cli/src/doctor/checks/network.rs`,
+  `crates/pdftract-cli/src/remote_metrics.rs`, …), all present in the tag
+  tree, plus the remote-only surface (`--header` "Custom HTTP headers for
+  remote sources", `RemoteFetchInterruptedError`), and the functional fetch
+  above succeeds — impossible on a remote-disabled build (exit 2, as the
+  negative control shows).
+- Caveat recorded for honesty: the preserved
+  `probe-tmp/build-cli-remote.log` is an earlier *failed* build attempt
+  against `~/pdftract` (E0277/E0599, 2026-09-29 12:06), not the log of the
+  successful build that produced `bin/pdftract-remote` (12:16); the
+  provenance above rests on the tree/tag/binary evidence listed.
+
 ### Prior salvage (probe-tmp, 2026-09-29)
 
 The earlier capture sets preserved in
