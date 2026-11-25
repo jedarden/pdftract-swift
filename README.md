@@ -117,14 +117,56 @@ print("Confidence: \(classification.confidence)")
 
 ### Verify receipt
 
-```swift
-let receipt = Receipt(data: "...")
-let result = try await client.verifyReceipt("/path/to/receipt.pdf", receipt: receipt)
-print("Valid: \(result.valid)")
-if let reason = result.reason {
-    print("Verification failed: \(reason)")
+A receipt is produced at extraction time: run `pdftract extract` with
+`--receipts lite` (or `--receipts svg`) and every span and block in the output
+JSON carries a `receipt` object alongside its text. Save that object to a file
+— that JSON file is what a verification consumes:
+
+```json
+{
+  "pdf_fingerprint": "pdftract-v1:a7f3...",
+  "page_index": 14,
+  "bbox": [220.0, 412.0, 412.0, 432.0],
+  "content_hash": "sha256:9b21...",
+  "extraction_version": "1.2.0"
 }
 ```
+
+`Receipt(data:)` wraps the **path** to such a receipt JSON file. The string is
+handed to the `verify-receipt` CLI unchanged as its `RECEIPT.json` positional
+argument, which the CLI reads from disk — so a receipt JSON *string* held in
+memory must be written to a file first; the CLI's `--inline` and stdin forms
+are not reachable through the SDK. All five fields above are required
+(`svg_clip`, present in `--receipts svg` output, is optional).
+
+```swift
+let receipt = Receipt(data: "/tmp/span-14.receipt.json")
+let result = try await client.verifyReceipt("/path/to/receipt.pdf", receipt: receipt)
+print("Valid: \(result.valid)")
+```
+
+Verification re-extracts `page_index` from the PDF and checks, in order: the
+PDF fingerprint matches the receipt's, some span overlaps the receipt's `bbox`
+with IoU ≥ 0.9, and that span's NFC-normalized SHA-256 equals `content_hash`.
+The receipt's `extraction_version` must match the binary's major **and** minor
+version or verification fails before any of those checks run (a patch-version
+difference is allowed, with a warning on stderr).
+
+The method returns only when the receipt verifies, so a returned
+`result.valid` is always `true` and `result.reason` (which decodes the CLI's
+`error` field — absent on success) is always `nil`. Every failed verification
+throws instead of returning a `valid == false` result:
+
+- `ReceiptVerifyError` — the PDF fingerprint check failed (CLI exit 10)
+- `PdftractError` — no span met the bbox IoU threshold (exit 11), the
+  best-overlap span's text hashed differently (exit 12), the PDF or the
+  receipt file was unreadable, or receipt and binary major/minor versions
+  differ (all exit 1)
+
+The CLI's structured failure report (its `verify-receipt --json` output on
+stdout) is discarded when the SDK maps a non-zero exit, so the thrown error
+carries the CLI's stderr — empty on the mismatch exits. Call the CLI directly
+when you need the per-check detail.
 
 ## Binary version compatibility
 

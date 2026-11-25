@@ -7,9 +7,10 @@ generator" half of that instruction. This guide is **hand-written** and lives
 under `docs/notes/` precisely because it is not generator output and must
 survive every refresh.
 
-Last verified against pdftract main (`ab720d47`, pdfswift-1959bda3's
-`Source.bytes` README-template fix, which sits on the still-unlanded local
-main above `a2ed4c967` + `12c63b65`) on 2026-11-24: a fresh
+Last verified against pdftract main (`5dcc52ec`, pdfswift-e7f9930c's
+verify-receipt contract docs — README/Types/Methods template edits plus the
+sdk-contract verify_receipt block, on the still-unlanded local main above
+`ab720d47` + `a2ed4c967` + `12c63b65`) on 2026-11-24: a fresh
 `pdftract sdk codegen --lang swift --version 1.2.0` reproduces all nine
 generated paths in this repo byte-for-byte, and `sdk validate` reports no
 `MODIFIED`/`MISSING` under any generated path (only the usual README

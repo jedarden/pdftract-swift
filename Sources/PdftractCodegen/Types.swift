@@ -311,14 +311,20 @@ public struct Classification: Codable, Sendable {
     public let heuristics: [String: Bool]
 }
 
-/// Receipt for verification.
+/// Receipt to verify against a PDF.
 public struct Receipt: Codable, Sendable {
+    /// Path to a receipt JSON file, passed through to `verify-receipt` as its
+    /// `RECEIPT.json` positional argument, which the CLI reads from disk.
+    /// Receipts are produced by `pdftract extract --receipts lite|svg`, which
+    /// embeds a `receipt` object (pdf_fingerprint, page_index, bbox,
+    /// content_hash, extraction_version, optional svg_clip) on every span and
+    /// block; save one of those objects to a file and wrap its path here. An
+    /// in-memory receipt JSON string must be written to a file first — the
+    /// CLI's `--inline` and stdin forms are not reachable through this SDK.
     public let data: String
 
-    /// Wraps a raw receipt string (the output of `pdftract receipt`) so it can
-    /// be handed back to `verifyReceipt`. Public because receipts arrive from
-    /// the CLI as opaque strings — decoding a JSON envelope is not how callers
-    /// get one.
+    /// Wraps the path of a receipt JSON file so it can be handed to
+    /// `verifyReceipt`.
     public init(data: String) {
         self.data = data
     }
@@ -326,9 +332,14 @@ public struct Receipt: Codable, Sendable {
 
 /// Result of verifying a receipt against a PDF.
 ///
-/// Decode of the `pdftract verify-receipt --json` output. `valid` is `true` when the
-/// receipt matched (`status == "ok"`); when `false`, `reason` carries the CLI's
-/// explanation of which check failed (fingerprint, bbox, or content hash).
+/// Decode of the `pdftract verify-receipt --json` output. `verifyReceipt`
+/// returns only when the receipt verified, so through that method `valid` is
+/// always `true` (`status == "ok"`) and `reason` is `nil`: every failed
+/// verification exits non-zero and surfaces as a thrown error instead
+/// (`ReceiptVerifyError` for the fingerprint check, `PdftractError` for the
+/// rest). The struct mirrors the CLI's JSON so the schema is typed; the
+/// non-ok statuses below are reachable only by decoding CLI output captured
+/// outside this SDK.
 public struct ReceiptVerificationResult: Codable, Sendable {
     /// Raw verification status reported by the CLI
     /// (`"ok"`, `"fingerprint_mismatch"`, `"bbox_mismatch"`, or `"content_mismatch"`).
@@ -337,7 +348,8 @@ public struct ReceiptVerificationResult: Codable, Sendable {
     public let bestIou: Double
     public let expectedContentHash: String?
     public let actualContentHash: String?
-    /// Human-readable explanation of why verification failed; `nil` when the receipt is valid.
+    /// The CLI's `error` field — its explanation of which check failed.
+    /// Absent from success output, so `nil` whenever `valid` is `true`.
     public let reason: String?
 
     private enum CodingKeys: String, CodingKey {

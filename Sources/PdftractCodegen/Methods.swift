@@ -784,18 +784,31 @@ public struct Pdftract {
     
     
     /// Verifies a receipt against a PDF.
+    ///
+    /// Verification re-extracts the receipt's page and checks the PDF
+    /// fingerprint, a span bbox overlap of at least 90% IoU, and the NFC-normalized
+    /// content hash. The receipt's `extraction_version` must match the binary's
+    /// major and minor version or verification fails before those checks.
     /// - Parameters:
     ///   - path: Path to the PDF file.
-    ///   - receipt: The receipt data to verify.
+    ///   - receipt: The receipt to verify — its `data` must be the path of a
+    ///     receipt JSON file (see `Receipt`); the string is passed to the CLI
+    ///     unchanged.
     ///   - timeout: Maximum seconds to let the pdftract process run before it
     ///     is terminated and reaped and `TimeoutError` is thrown. `nil` (the
     ///     default) waits indefinitely. Cancelling the surrounding Task has
     ///     the same effect at any time.
-    /// - Returns: A `ReceiptVerificationResult`. Its `valid` property is `true` when the
-    ///   receipt matches; when invalid, `reason` describes which verification check failed.
-    /// - Throws: `PdftractError` if the CLI invocation itself fails (not a receipt
-    ///   validation failure), `TimeoutError` on deadline expiry,
-    ///   `CancellationError` if the Task is cancelled.
+    /// - Returns: A `ReceiptVerificationResult`, decoded from the CLI's
+    ///   `--json` output. The method returns only when the receipt verified,
+    ///   so `valid` is always `true` and `reason` always `nil` here — the
+    ///   struct's failure fields mirror the CLI schema and are filled only
+    ///   by decodes outside this call.
+    /// - Throws: `ReceiptVerifyError` when the PDF fingerprint check fails
+    ///   (CLI exit 10); `PdftractError` when the bbox or content-hash check
+    ///   fails (exits 11/12), the PDF or receipt file is unreadable, or
+    ///   receipt and binary major/minor versions differ (exit 1);
+    ///   `TimeoutError` on deadline expiry, `CancellationError` if the Task
+    ///   is cancelled.
     public func verifyReceipt(_ path: String, receipt: Receipt, timeout: TimeInterval? = nil) async throws -> ReceiptVerificationResult {
         let output = try await exec(["verify-receipt", path, receipt.data, "--json"], timeout: timeout)
 
