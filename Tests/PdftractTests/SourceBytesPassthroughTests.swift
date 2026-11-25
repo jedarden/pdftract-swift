@@ -17,8 +17,10 @@
 //   1. Spill. The caller's `Data` reaches disk byte-for-byte (multi-byte
 //      UTF-8 and an embedded NUL pin exact-bytes copying, not just length),
 //      under a `pdftract-input-<UUID>.pdf` name in the temp directory, and
-//      the child receives that path as the sole positional argument — no
-//      source flags, no inline data on the argv.
+//      the child receives that path as a positional argument — no inline
+//      data on the argv. It is the SOLE argument for the flagless consumers
+//      (extract, both streaming paths, search); extractText and
+//      extractMarkdown append only their format flag (+ --json) after it.
 //   2. Cleanup. The SDK deletes the spill itself when the call finishes —
 //      the README's "no manual cleanup is required" promise. Asserted on the
 //      success path (the buffered `defer` runs before `extract` returns), on
@@ -163,20 +165,25 @@ final class SourceBytesPassthroughTests: XCTestCase {
     }
 
     /// Shared spill-shape assertions for a captured buffered/streaming argv:
-    /// the source argument is the spill and nothing else about it appears on
-    /// the argv. Returns the spill path for the caller's content/cleanup
-    /// assertions.
+    /// the element at `sourceArgumentIndex` is the spill and nothing else
+    /// about it appears on the argv. `followedBy` names the arguments that
+    /// legitimately trail the spill — empty for the flagless consumers, where
+    /// the spill is the LAST element (the shape the count assertion used to
+    /// hard-code, which wrongly failed the `extractText`/`extractMarkdown`
+    /// call sites whose format flags follow the source). Returns the spill
+    /// path for the caller's content/cleanup assertions.
     @discardableResult
     private static func assertSpillArgument(
         _ argv: [String],
         sourceArgumentIndex: Int,
+        followedBy flags: [String] = [],
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws -> String {
         XCTAssertEqual(
             argv.count,
-            sourceArgumentIndex + 1,
-            "expected exactly \(sourceArgumentIndex + 1) argv elements (source last), sent \(argv)",
+            sourceArgumentIndex + 1 + flags.count,
+            "expected exactly \(sourceArgumentIndex + 1 + flags.count) argv elements (spill + \(flags)), sent \(argv)",
             file: file,
             line: line
         )
@@ -330,7 +337,11 @@ final class SourceBytesPassthroughTests: XCTestCase {
         _ = try await client.extractText(.bytes(Self.pdfBytes))
         let textArgv = try Self.capturedArguments(from: stub.capturePath)
         XCTAssertEqual(textArgv[0], "extract")
-        let textSpill = try Self.assertSpillArgument(textArgv, sourceArgumentIndex: 1)
+        let textSpill = try Self.assertSpillArgument(
+            textArgv,
+            sourceArgumentIndex: 1,
+            followedBy: ["--text", "--json"]
+        )
         XCTAssertEqual(
             Array(textArgv.dropFirst(2)),
             ["--text", "--json"],
@@ -344,7 +355,11 @@ final class SourceBytesPassthroughTests: XCTestCase {
         _ = try await client.extractMarkdown(.bytes(Self.pdfBytes))
         let markdownArgv = try Self.capturedArguments(from: stub.capturePath)
         XCTAssertEqual(markdownArgv[0], "extract")
-        let markdownSpill = try Self.assertSpillArgument(markdownArgv, sourceArgumentIndex: 1)
+        let markdownSpill = try Self.assertSpillArgument(
+            markdownArgv,
+            sourceArgumentIndex: 1,
+            followedBy: ["--md", "--json"]
+        )
         XCTAssertEqual(
             Array(markdownArgv.dropFirst(2)),
             ["--md", "--json"],
