@@ -288,9 +288,18 @@ Require `Succeeded` on a workflow **created after your push**. Three gotchas:
   Same command CI runs, no local Swift toolchain needed (this box has
   none). Docker writes `$D/.build` as root — clean up with `sudo rm -rf`.
   Expect `ExtractStreamConformanceTests`/`ConformanceTests` noise to be
-  skips, and never add `ProcessLifecycleTests` to the filter: it fails 3/6
-  in docker-class containers for environment reasons unrelated to any drop
-  (see the CI map in codegen-refresh.md).
+  skips. Since pdfswift-b64f41eb (2026-11-25) the whole target —
+  `ProcessLifecycleTests` included — passes in docker-class containers (the
+  old 3/6 container failures were probe-measured platform facts plus
+  harness artifacts: a `waitUntilExit()` parked across the child's death
+  never receives the exit event on this Foundation, and children spawned
+  from cooperative threads are born with SIGTERM blocked; the fakes now
+  trap SIGTERM into a marker + prompt exit 0, background a /dev/null'd
+  sleep whose pid the trap kills from a `$!`-captured variable so no
+  orphan exists, and the SDK drains before reaping and unblocks SIGTERM
+  around the spawn). Prefer
+  `scripts/definition-of-done.sh` over the hand-rolled
+  recipe — it is the same command with the volume hygiene built in.
 
 ### 2. Cut the tag
 

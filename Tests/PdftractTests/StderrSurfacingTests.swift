@@ -90,12 +90,17 @@ final class StderrSurfacingTests: XCTestCase {
     /// `timeout:` — so only the SDK's deadline machinery can end it. Mirrors
     /// the fake binaries in ProcessLifecycleTests; the pidfile lets the test
     /// SIGKILL any leftover child so a failure path can never leak a sleeper
-    /// into later suites. The sleep is 5s, not that suite's 60s: this suite
-    /// runs in the CI gate (which skips the lifecycle suite), and the gate's
-    /// containerized environment is one where SIGTERM does not end the child
-    /// (the known ProcessLifecycleTests limitation), so the worst case is the
-    /// full sleep — 5s bounds it while still leaving the 1s deadline 5×
-    /// margin to fire first.
+    /// into later suites. The sleep's stdout/stderr are redirected to
+    /// /dev/null: the stub is a shell script, so the shell it forks would
+    /// otherwise outlive the SIGTERM-killed stub holding the stderr pipe
+    /// write end — the SDK's drain would then block on EOF for the sleep's
+    /// full budget before the deadline error could carry the marker. (The
+    /// sleep carries no trap: this suite pins the timeout path, and the
+    /// deadline's SIGTERM is what ends the stub.) The sleep is 5s — well past
+    /// the 1s deadline, which still fires first (the TimeoutError plus the
+    /// verbatim stderr prove the SDK ended the call); the SDK awaits the
+    /// drains before reaping, so the SIGTERM-killed shell's EOF ends the call
+    /// promptly at the deadline rather than at the sleep's natural expiry.
     private static func writeSleepingStubBinary() throws -> (directory: URL, binaryPath: String, pidPath: String) {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdftract-stderr-surfacing-\(UUID().uuidString)", isDirectory: true)
@@ -107,7 +112,7 @@ final class StderrSurfacingTests: XCTestCase {
         var script = "#!/bin/sh\n"
         script += "echo $$ > '\(pidPath)'\n"
         script += "echo '\(timeoutStderrMarker)' >&2\n"
-        script += "sleep 5\n"
+        script += "sleep 5 > /dev/null 2>&1\n"
         script += "exit 0\n"
 
         try script.write(toFile: binaryPath, atomically: true, encoding: .utf8)

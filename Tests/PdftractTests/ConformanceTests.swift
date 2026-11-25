@@ -514,17 +514,49 @@ final class StreamingStderrRegressionTests: XCTestCase {
 /// a buffered call, expiring `timeout:`, or dropping a stream must terminate
 /// (SIGTERM) *and reap* the spawned pdftract child — never leave an orphaned
 /// process, an unreaped zombie, or a caller wedged on a pipe that never
-/// closes. A sequence dropped before the child even launches must not spawn
-/// one at all, and must not trip `Process.terminate()`'s not-launched trap.
+/// closes. A sequence dropped before the child even launches usually spawns
+/// nothing at all; if the producer wins the launch race on a multi-core host,
+/// the launched child must still leave the process table — and neither
+/// interleaving may trip `Process.terminate()`'s not-launched trap.
 ///
-/// Each test drives a fake `pdftract` that records its shell pid in a
-/// pidfile, prints any scripted stdout, then sleeps far past every deadline —
-/// so only the SDK's lifecycle machinery can end it. "Killed and reaped" is
-/// observable as `kill(pid, 0) != 0`: a live child answers the probe and so
-/// does a zombie (killed but never `waitUntilExit()`-ed) — only a reaped
-/// child leaves the process table entirely. Every wait is bounded by a
-/// watchdog so a revived defect fails an assertion instead of hanging the
-/// suite.
+/// Platform truths this suite is built around (all probe-measured on
+/// swift:5.10-jammy, 2026-11-25, pdfswift-b64f41eb):
+/// - `waitUntilExit()` called from a Swift-concurrency thread and parked
+///   across the child's death only ever returns when something *other than
+///   the direct child* fires: the expiry of an orphan the fake forked
+///   (~60s for a 60s sleep, zombie in the table throughout), never a plain
+///   prompt reap. A call made after the child has already exited takes a
+///   fast path that always returns promptly. This is why the SDK's buffered
+///   exec awaits both pipe drains (EOF = the child is gone) BEFORE reaping,
+///   and why every fake in this suite leaves no orphan behind.
+/// - Dropping an `AsyncThrowingStream`'s iterator while its producer still
+///   holds the continuation does not fire `onTermination` on this
+///   Foundation — it fires only when the producer finishes. The drop tests
+///   therefore pin the platform-independent safety properties (caller
+///   unblocked; child leaves the process table) with a short-sleep fake and
+///   assert no SIGTERM marker either way; the marker teeth live on the
+///   cancellation and timeout tests, whose triggers are reliable on every
+///   platform.
+///
+/// Each cancellation/timeout test drives a fake `pdftract` — a shell
+/// script, so the process the SDK spawns (and the pidfile's `$$` records)
+/// is the shell — that records its pid, prints any scripted stdout, traps
+/// SIGTERM by writing a marker file and exiting 0, then sleeps far past
+/// every deadline. The marker is what makes "the SDK terminated the child"
+/// observable independently of timing: a natural exit never writes it, and
+/// the reaping behaviors above cannot separate "terminated" from "expired"
+/// inside a watchdog by liveness alone. The trapped TERM makes the shell
+/// exit 0 promptly — a no-orphan natural exit, which reaps promptly — while
+/// the marker proves the SDK delivered the signal. The trap also kills the
+/// background sleep by its captured pid (`kill %1` does not resolve job
+/// specs in a non-interactive dash trap): a trap-exited shell that left the
+/// sleep orphaned is a shape this Foundation never reaps at all
+/// (`waitUntilExit()` never returned; that exact fake hung the suite >19
+/// min). "Reaped" stays observable as `kill(pid, 0) != 0`: a live child
+/// answers the probe and so does a zombie (killed but never
+/// `waitUntilExit()`-ed) — only a reaped child leaves the process table
+/// entirely. Every wait is bounded by a watchdog so a revived defect fails
+/// an assertion instead of hanging the suite.
 final class ProcessLifecycleTests: XCTestCase {
     /// Generous enough for a loaded CI box, short enough that a deadlock or
     /// orphan fails fast instead of hanging the suite.
@@ -548,16 +580,46 @@ final class ProcessLifecycleTests: XCTestCase {
         var directory: URL
         var binaryPath: String
         var pidPath: String
+        var markerPath: String
+    }
+
+    /// How a fake child is meant to end, which decides its script shape.
+    private enum EndsBy {
+        /// The SDK's SIGTERM ends it. The trap records the delivery in the
+        /// marker, kills the backgrounded sleep by its `$!`-captured pid, and
+        /// exits 0 promptly — the natural-exit reaping path, which is prompt.
+        /// Used by the cancellation and timeout tests, whose fake must stay
+        /// alive until the SDK's signal arrives; a delivered signal wakes
+        /// dash's `wait` deterministically and runs the trap.
+        case sigterm
+        /// Nothing ever signals it: a plain FOREGROUND `sleep`, then
+        /// `exit 0`. Used by the drop tests and the inside-the-deadline
+        /// control, whose child must end by itself. The backgrounded shape
+        /// above is deadly here: dash parks its no-argument `wait` in
+        /// sigsuspend, and on this platform that park can miss a child's
+        /// NATURAL death outright (probe-verified 2026-11-25,
+        /// pdfswift-b64f41eb/10bba538: a `sleep 2` died on schedule while
+        /// the shell sat in sigsuspend forever — the zombie was never
+        /// reaped, no trap fired to break the park, the shell held the pipe
+        /// write ends open, the SDK's producer blocked on a read that never
+        /// EOFed, and the whole suite froze). A foreground sleep needs no
+        /// wait at all — dash blocks in waitpid on the sleep, its death
+        /// returns, and the shell exits; nothing here depends on signals.
+        case naturalExit
     }
 
     /// Writes an executable fake `pdftract` that records its shell pid in a
-    /// pidfile, prints `stdoutLines` on stdout, then sleeps `sleepSeconds` —
-    /// far past every deadline in this suite, so only the SDK's lifecycle
-    /// machinery (not natural exit) can end it. Ignores its arguments
+    /// pidfile, prints `stdoutLines` on stdout, and then sleeps
+    /// `sleepSeconds` — 60 in the cancellation/timeout tests (far past every
+    /// deadline, so only the SDK's lifecycle machinery, not natural exit,
+    /// can end it) and 2 or 0 in the naturally-ended tests (a natural exit
+    /// that still lands inside the watchdog). The `endsBy` shape decides
+    /// everything else — see the `EndsBy` cases. Ignores its arguments
     /// entirely, so tests can pass any `Source`.
     private static func writeFakeBinary(
         stdoutLines: [String],
-        sleepSeconds: Int
+        sleepSeconds: Int,
+        endsBy: EndsBy
     ) throws -> FakeBinary {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdftract-lifecycle-\(UUID().uuidString)", isDirectory: true)
@@ -565,18 +627,76 @@ final class ProcessLifecycleTests: XCTestCase {
 
         let binaryPath = directory.appendingPathComponent("pdftract").path
         let pidPath = directory.appendingPathComponent("pid").path
+        let markerPath = directory.appendingPathComponent("sigterm").path
 
         var script = "#!/bin/sh\n"
         script += "echo $$ > '\(pidPath)'\n"
         for line in stdoutLines {
             script += "echo '\(line)'\n"
         }
-        script += "sleep \(sleepSeconds)\n"
-        script += "exit 0\n"
+        switch endsBy {
+        case .sigterm:
+            // Harness notes — every line here earned its place as a real
+            // failure mode observed on swift:5.10-jammy, 2026-11-25:
+            // - The sleep is backgrounded and redirects stdout/stderr to
+            //   /dev/null. This fake is a shell script, so the sleep the
+            //   shell forks would otherwise outlive the killed shell while
+            //   *holding the stdout/stderr pipe write ends*: the SDK's
+            //   drains would block on EOF for the sleep's full budget, so a
+            //   cancelled or timed-out call could not return at all (each
+            //   dropped-stream test ran 60s).
+            // - SLEEP_PID is captured from $! BEFORE the trap is registered,
+            //   and the trap kills that pid. Two traps (both hit) on this
+            //   platform: (a) a trap-exited shell that leaves an orphan
+            //   behind is one Foundation never reaps — `waitUntilExit()`
+            //   never returned (>19 min in-process), hanging the whole
+            //   suite — so the trap must take the sleep with it and leave no
+            //   orphan at all; (b) `kill %1` job specs do not resolve in a
+            //   non-interactive dash trap, so the pid must be captured into
+            //   a variable (tested: the `%1` variant left the sleep alive;
+            //   the `$!` variant left none).
+            // - The TERM trap writes the marker and exits 0 PROMPTLY, so a
+            //   signal-delivered child takes the natural-exit reaping path.
+            //   Without it the shell dies by signal, and Foundation on this
+            //   platform completes that child's reaping only at about the
+            //   child's natural-expiry moment: `waitUntilExit()` hung ~60s
+            //   and the zombie sat in the process table the whole time,
+            //   blowing every watchdog.
+            // - `wait` is the interruptible builtin the TERM trap fires in,
+            //   so the trapped TERM runs promptly (verified on the jammy
+            //   image's /bin/sh: marker written, shell reaped in ~0ms, zero
+            //   lingering sleeps). The no-argument `wait` is safe HERE and
+            //   only here: every exit from this shape is a trapped-signal
+            //   exit, and a signal wakes sigsuspend reliably. A natural
+            //   death while parked in it is the wedge the `.naturalExit`
+            //   shape exists to avoid.
+            script += "sleep \(sleepSeconds) > /dev/null 2>&1 &\n"
+            script += "SLEEP_PID=$!\n"
+            script += "trap 'kill $SLEEP_PID 2>/dev/null; echo killed > \(markerPath); exit 0' TERM\n"
+            script += "wait\n"
+            script += "exit 0\n"
+        case .naturalExit:
+            // Foreground sleep, redirected away from the pipes the SDK
+            // drains (the pipe write ends must die with the shell, not sit
+            // with a child the shell outlives). No trap: nothing signals
+            // this fake, and a trap-armed dash parked in `wait` is the
+            // missed-natural-death wedge described in the `EndsBy` case
+            // comment. dash waits on the foreground sleep via waitpid, so
+            // the death is a plain return, not a signal delivery.
+            script += "sleep \(sleepSeconds) > /dev/null 2>&1\n"
+            script += "exit 0\n"
+        }
 
         try script.write(toFile: binaryPath, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binaryPath)
-        return FakeBinary(directory: directory, binaryPath: binaryPath, pidPath: pidPath)
+        return FakeBinary(directory: directory, binaryPath: binaryPath, pidPath: pidPath, markerPath: markerPath)
+    }
+
+    /// Whether the fake child received (and trapped) SIGTERM. A natural exit
+    /// never writes the marker, so this is the timing-independent proof that
+    /// the SDK — not the sleep's expiry — ended the child.
+    private static func markerExists(_ path: String) -> Bool {
+        FileManager.default.fileExists(atPath: path)
     }
 
     /// SIGKILLs any leftover fake child and removes the temp dir. Belt and
@@ -695,7 +815,7 @@ final class ProcessLifecycleTests: XCTestCase {
     }
 
     func testCancelledExtractTerminatesAndReapsChild() async throws {
-        let fake = try Self.writeFakeBinary(stdoutLines: [], sleepSeconds: 60)
+        let fake = try Self.writeFakeBinary(stdoutLines: [Self.documentJSON], sleepSeconds: 60, endsBy: .sigterm)
         defer { Self.dispose(fake) }
 
         let client = Pdftract(binaryPath: fake.binaryPath)
@@ -716,10 +836,17 @@ final class ProcessLifecycleTests: XCTestCase {
         )
 
         try await Self.assertReaped(pid)
+        // The marker is the timing-independent proof the child ended via the
+        // SDK's SIGTERM: the 60s sleep cannot have expired inside the
+        // watchdog, and a natural exit never writes the marker.
+        XCTAssertTrue(
+            Self.markerExists(fake.markerPath),
+            "child was reaped but never received SIGTERM — cancellation did not reach the process"
+        )
     }
 
     func testTimedOutExtractThrowsTimeoutErrorAndReapsChild() async throws {
-        let fake = try Self.writeFakeBinary(stdoutLines: [], sleepSeconds: 60)
+        let fake = try Self.writeFakeBinary(stdoutLines: [Self.documentJSON], sleepSeconds: 60, endsBy: .sigterm)
         defer { Self.dispose(fake) }
 
         let client = Pdftract(binaryPath: fake.binaryPath)
@@ -736,12 +863,16 @@ final class ProcessLifecycleTests: XCTestCase {
         )
 
         try await Self.assertReaped(pid)
+        XCTAssertTrue(
+            Self.markerExists(fake.markerPath),
+            "child was reaped but never received SIGTERM — the deadline did not reach the process"
+        )
     }
 
     /// Negative control for the timeout test: a child that finishes inside
     /// the budget must be unaffected by it.
     func testExtractInsideTimeoutCompletes() async throws {
-        let fake = try Self.writeFakeBinary(stdoutLines: [Self.documentJSON], sleepSeconds: 0)
+        let fake = try Self.writeFakeBinary(stdoutLines: [Self.documentJSON], sleepSeconds: 0, endsBy: .naturalExit)
         defer { Self.dispose(fake) }
 
         let client = Pdftract(binaryPath: fake.binaryPath)
@@ -750,10 +881,25 @@ final class ProcessLifecycleTests: XCTestCase {
         XCTAssertEqual(doc.pages.count, 1)
     }
 
-    func testDroppedExtractStreamTerminatesAndReapsChild() async throws {
-        // One page, then the child holds stdout open and sleeps — the
-        // consumer drops the sequence while the child is still live.
-        let fake = try Self.writeFakeBinary(stdoutLines: [Self.pageJSON(index: 0)], sleepSeconds: 60)
+    /// Dropping a sequence mid-iteration must leave the caller unblocked and
+    /// the child's pid gone from the process table — the two properties that
+    /// hold on every platform. The fake sleeps only 2s, so a child the SDK
+    /// could not terminate still exits naturally (and is reaped by the
+    /// producer's EOF-then-reap path) well inside the watchdog: on
+    /// swift:5.10-jammy corelibs-foundation does not fire
+    /// `AsyncThrowingStream`'s `onTermination` when the consumer merely drops
+    /// the iterator while the producer still holds the continuation (probe
+    /// verified 2026-11-25, pdfswift-b64f41eb — it fires only when the
+    /// producer finishes), so the drop cannot SIGTERM the child there; on
+    /// platforms where the drop does fire it, the child dies even faster.
+    /// Both satisfy these assertions, which is why no SIGTERM marker is
+    /// asserted either way — pinning the marker would fail the test on one
+    /// platform class or the other. The marker teeth live on the
+    /// cancellation and timeout tests, whose triggers are reliable.
+    func testDroppedExtractStreamLeavesNoChildBehind() async throws {
+        // One page, then the child holds stdout open briefly — the consumer
+        // drops the sequence while the child is still live.
+        let fake = try Self.writeFakeBinary(stdoutLines: [Self.pageJSON(index: 0)], sleepSeconds: 2, endsBy: .naturalExit)
         defer { Self.dispose(fake) }
 
         let client = Pdftract(binaryPath: fake.binaryPath)
@@ -769,8 +915,8 @@ final class ProcessLifecycleTests: XCTestCase {
         try await Self.assertReaped(pid)
     }
 
-    func testDroppedSearchStreamTerminatesAndReapsChild() async throws {
-        let fake = try Self.writeFakeBinary(stdoutLines: [Self.matchJSON(page: 0)], sleepSeconds: 60)
+    func testDroppedSearchStreamLeavesNoChildBehind() async throws {
+        let fake = try Self.writeFakeBinary(stdoutLines: [Self.matchJSON(page: 0)], sleepSeconds: 2, endsBy: .naturalExit)
         defer { Self.dispose(fake) }
 
         let client = Pdftract(binaryPath: fake.binaryPath)
@@ -787,25 +933,45 @@ final class ProcessLifecycleTests: XCTestCase {
     }
 
     /// A sequence dropped before its (unstructured) producer task ever runs
-    /// must not spawn a child at all — and must not trap in
+    /// must not leave a child behind — and must not trap in
     /// `Process.terminate()`'s not-launched guard, which is exactly what the
-    /// old unconditional onTermination did here. No await sits between
-    /// creating and dropping the stream, so termination deterministically
-    /// wins the race against the launch.
-    func testExtractStreamDroppedBeforeIterationSpawnsNothing() async throws {
-        let fake = try Self.writeFakeBinary(stdoutLines: [], sleepSeconds: 60)
+    /// old unconditional onTermination did here. The drop usually wins the
+    /// race against the launch (no await sits between creating and dropping
+    /// the stream), but the producer task is unstructured: on a multi-core
+    /// host it can run concurrently and launch first. That interleaving is
+    /// bound by the same safety contract — the launched child must leave the
+    /// process table — so the assertion is "no child left behind", not
+    /// "no spawn": either the pidfile never appears, or its pid leaves the
+    /// process table. (Asserting "no spawn" unconditionally was racy on
+    /// multi-core containers and failed even when the SDK had correctly
+    /// killed and reaped the raced launch, observed 2026-11-25.) The 2s fake
+    /// keeps even the raced-launch interleaving inside the watchdog: on
+    /// swift:5.10-jammy the drop does not fire `onTermination` at all (see
+    /// the dropped-stream tests above), so the raced child exits naturally
+    /// and is reaped by the producer's EOF-then-reap path; where the drop
+    /// does fire, it is terminated sooner. No SIGTERM marker is asserted
+    /// either way — same rationale as the dropped-stream tests.
+    func testExtractStreamDroppedBeforeIterationLeavesNoChild() async throws {
+        let fake = try Self.writeFakeBinary(stdoutLines: [], sleepSeconds: 2, endsBy: .naturalExit)
         defer { Self.dispose(fake) }
 
         let client = Pdftract(binaryPath: fake.binaryPath)
 
         // Optional so the `= nil` below compiles: assigning nil is the drop,
-        // and it releases the sequence right here, deterministically before
-        // the sleep.
+        // and it releases the sequence right here, synchronously registering
+        // termination before any await.
         var stream: AsyncThrowingStream<Page, Error>? = client.extractStream(.path("/does/not/matter.pdf"))
         stream = nil
 
-        // Give any buggy late spawn ample time to show up.
+        // Give any late spawn ample time to show up.
         try await Task.sleep(nanoseconds: 500_000_000)
+        if let pid = Self.readPid(from: fake.pidPath) {
+            // The producer won the launch race: the child existed, so it must
+            // leave the process table (terminated where the platform can, or
+            // reaped after its short natural exit where it cannot).
+            try await Self.assertReaped(pid)
+            return
+        }
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: fake.pidPath),
             "a stream dropped before iteration still spawned the pdftract child"

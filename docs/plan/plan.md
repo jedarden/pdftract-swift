@@ -61,8 +61,11 @@ bf-57b and re-proven post-Forgejo-migration 2026-09-25). Gate on `swift:5.10-jam
 `swift build` + `swift build --build-tests` + `swift test --skip ProcessLifecycleTests` — the
 expanded gate from declarative-config `b947d7a35` (live 2026-11-25). The original two-suite
 `--filter` lost its reason when the pdfswift-8f868708 XCTSkip guards made the binary-dependent
-suites skip cleanly, while `ProcessLifecycleTests` still fails 3/6 in docker-class containers
-for environment reasons (drop the `--skip` when pdfswift-b64f41eb lands). The gate has
+suites skip cleanly, and `ProcessLifecycleTests`'s 3/6 docker-class container failures turned
+out to be a test-harness artifact (pdfswift-b64f41eb: the fake binaries' orphaned forked `sleep`
+held the pipes open; fixed upstream, template `c639bf9c`) — the whole target passes in the gate
+image now, the local DoD/e2e gates run it, and the gate template's `--skip` remains only
+pending a declarative-config update. The gate has
 verified teeth (bf-25c): reverting the lowerCamelCase API surface on a throwaway branch makes
 `swift build --build-tests` exit 1, and it went green on three consecutive runs under load.
 Latest proof (2026-11-25): the auto-triggered run `pdftract-swift-build-v7hq6` (auto-generated
@@ -113,6 +116,36 @@ scoped in its own bead.
   (pdfswift-d971f54f); CI gate expanded to the full suite minus `ProcessLifecycleTests`
   (declarative-config `b947d7a35`); Sendable/concurrency drop regenerated
   (pdfswift-215641c8, a87876f8).
+- 2026-11-25 (later): `ProcessLifecycleTests` diagnosed and fixed for containers
+  (pdfswift-b64f41eb). The 3/6 failures had two roots, both probe-measured. SDK-side: a
+  `waitUntilExit()` that runs on a Swift-concurrency thread and parks across the child's
+  death never receives the exit event from corelibs-foundation on this image — it returns
+  only when some process other than the direct child fires (observed as ≈ the forked
+  `sleep`'s natural expiry, zombie in the table throughout), so the SDK's buffered exec now
+  awaits its pipe drains (EOF proves the child is gone) BEFORE reaping, taking the
+  always-works post-exit fast path; and posix_spawn inherits the launching thread's signal
+  mask, so children spawned from cooperative threads (SIGTERM blocked) could never receive
+  the cancellation/timeout SIGTERM at all — the SDK unblocks SIGTERM around the spawn
+  window (`runWithDeliverableTermination`). Harness-side: the fakes were shell scripts
+  whose forked `sleep` outlived the killed shell while holding the pipe write ends, and a
+  trap-exited fake that left its `sleep` orphaned was never reaped at all; the fakes now
+  trap SIGTERM into a marker file + prompt exit 0, background a /dev/null'd sleep whose
+  pid the trap `kill`s from a `$!`-captured variable (`kill %1` does not resolve in a
+  non-interactive dash trap), and leave no orphan. The marker proves SDK-delivered
+  termination independent of timing; on this Foundation a dropped stream fires
+  `onTermination` only when its producer finishes, so the drop tests pin safety (child
+  leaves the process table) rather than the marker. One more harness wedge found while
+  proving slice 1 (pdfswift-10bba538): a dash parked in a no-argument `wait` can MISS a
+  child's natural death outright — sigsuspend never returns, the trap-armed shell held the
+  pipe write ends forever, and the suite froze — so every naturally-ended fake (the drop
+  tests and the inside-the-deadline control) now takes `endsBy: .naturalExit`: a plain
+  foreground `sleep` (waitpid return, no signals involved), while the signal-ended
+  cancellation/timeout fakes keep the trap shape (a delivered signal wakes sigsuspend
+  reliably). The whole target passes unfiltered in
+  the gate image; the DoD and e2e gates dropped their `--skip` (the iad-ci gate template
+  still carries it pending a declarative-config update). Upstream template commits:
+  pdftract local `56bc8849` + `39da7bfe` + `c639bf9c` + `0317c180` (drain-before-reap and
+  safety-only drop tests) + `017ee137` (naturally-ended fakes never park in `wait`).
 
 ## ADR-1: 2026-07-20 — CI-gated build/release pipeline for the generated Swift SDK, plus an interim naming-compatibility shim
 

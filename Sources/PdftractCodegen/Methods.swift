@@ -4,6 +4,14 @@
 
 #if os(Linux)
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
+#elseif os(macOS)
+import Foundation
+import Darwin
 #else
 import Foundation
 #endif
@@ -110,7 +118,7 @@ public struct Pdftract: Sendable {
             return try await withTaskCancellationHandler {
                 guard !Task.isCancelled else { throw CancellationError() }
 
-                try process.run()
+                try Self.runWithDeliverableTermination(process)
                 spawned.didLaunch(process)
 
                 // A cancellation that landed between handler registration and
@@ -145,13 +153,25 @@ public struct Pdftract: Sendable {
                 let stdoutTask = Task { outPipe.fileHandleForReading.readDataToEndOfFile() }
                 let stderrTask = Task { errPipe.fileHandleForReading.readDataToEndOfFile() }
 
-                // Blocks only until the child exits — naturally, or promptly
-                // once cancellation/timeout has terminated it — and reaps the
-                // child exactly once.
-                spawned.reap()
-
+                // Drains BEFORE reaping — the order is load-bearing on Linux.
+                // When waitUntilExit() runs on a Swift-concurrency thread and
+                // parks across the child's death, corelibs-foundation on
+                // swift:5.10-jammy never delivers the exit event to it (a call
+                // parked across the exit wedged forever when the test fake
+                // left no other process to fire; measured 2026-11-25,
+                // pdfswift-b64f41eb). A call made after the child has already
+                // exited takes a fast path that always works. Awaiting the
+                // drains first guarantees exactly that: EOF means the child —
+                // the sole holder of the pipe write ends — is gone, so the
+                // reap below finds an exited child and completes promptly.
+                // This mirrors the streaming methods, which reap after
+                // reading to EOF for the same reason.
                 let outData = await stdoutTask.value
                 let errData = await stderrTask.value
+
+                // Reaps the child exactly once; by this point the child has
+                // exited (the drains above saw EOF), so this cannot park.
+                spawned.reap()
 
                 // Order matters: a cancelled or timed-out run was killed by
                 // this SDK, so its nonzero exit status is the kill signal, not
@@ -219,6 +239,40 @@ public struct Pdftract: Sendable {
         try? pipe.fileHandleForWriting.close()
         process.standardInput = pipe
         return pipe
+    }
+
+    /// Launches `process` with SIGTERM deliverable in the child.
+    ///
+    /// posix_spawn inherits the launching thread's signal mask, and
+    /// Foundation sets no `POSIX_SPAWN_SETSIGMASK` to override it. Swift
+    /// concurrency's cooperative threads run with every catchable signal
+    /// blocked — SIGTERM included — and every spawn site here executes on
+    /// one (the buffered `exec` operation, or a streaming producer Task).
+    /// A child spawned from such a thread therefore starts with SIGTERM
+    /// blocked: the cancellation and timeout paths' `terminate()` enqueues
+    /// a signal the child can never act on, and the call wedges until the
+    /// child exits on its own. Unblocking SIGTERM for the spawn window
+    /// alone gives the child a deliverable SIGTERM; the calling thread's
+    /// mask is restored synchronously before any suspension point, so no
+    /// other task can observe the widened window.
+    private static func runWithDeliverableTermination(_ process: Process) throws {
+        #if os(Linux) || os(macOS)
+        var toUnblock = sigset_t()
+        var saved = sigset_t()
+        sigemptyset(&toUnblock)
+        sigaddset(&toUnblock, SIGTERM)
+        guard pthread_sigmask(SIG_UNBLOCK, &toUnblock, &saved) == 0 else {
+            // Mask manipulation failed (not observed in practice): launch
+            // anyway — an undeliverable SIGTERM is the pre-fix status quo,
+            // and refusing every call would be strictly worse.
+            try process.run()
+            return
+        }
+        defer { pthread_sigmask(SIG_SETMASK, &saved, nil) }
+        try process.run()
+        #else
+        try process.run()
+        #endif
     }
 
     /// Maps CLI exit codes to Swift errors.
@@ -499,7 +553,7 @@ public struct Pdftract: Sendable {
                     // orphaned pdftract process" failure mode.
                     guard !spawned.isStopRequested() else { return }
 
-                    try process.run()
+                    try Self.runWithDeliverableTermination(process)
                     spawned.didLaunch(process)
 
                     // A termination that landed between registration and the
@@ -666,7 +720,7 @@ public struct Pdftract: Sendable {
                     // orphaned pdftract process" failure mode.
                     guard !spawned.isStopRequested() else { return }
 
-                    try process.run()
+                    try Self.runWithDeliverableTermination(process)
                     spawned.didLaunch(process)
 
                     // A termination that landed between registration and the

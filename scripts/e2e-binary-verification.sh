@@ -20,17 +20,17 @@
 #      attachments behind sign-in, so a credential would test something a
 #      consumer cannot do — same reasoning as spm-install-smoke.sh),
 #      and verifies the tarball against the published sums before use,
-#   3. runs `swift test --skip ProcessLifecycleTests` in the
-#      swift:5.10-jammy image — the same image and the same suite as the
-#      definition-of-done / pdftract-swift-build gates — with the binary
+#   3. runs `swift test` in the swift:5.10-jammy image — the same image and
+#      the same suite as the definition-of-done gate — with the binary
 #      mounted read-only onto a PATH directory inside the container, so
 #      the binary-gated suites EXECUTE instead of skip,
 #   4. fails if the suite failed OR if any single test was skipped: inside
 #      this run the guard can only mean provisioning broke, and a pin that
 #      silently stops running is exactly the drift this gate exists to
-#      catch. (ProcessLifecycleTests is `--skip`ed to mirror the CI gate —
-#      its process-spawn/cancellation assertions time out in containerized
-#      environments regardless of any binary.)
+#      catch. (ProcessLifecycleTests runs too since pdfswift-b64f41eb:
+#      its fake binaries now survive containerized environments, and its
+#      fake children ignore their arguments, so the pinned binary's real
+#      behavior is irrelevant to them.)
 #
 # Verdict, per the run this script was written for (2026-11-25, v1.2.0):
 # the suite is GREEN against the release binary as it ships — the
@@ -123,7 +123,7 @@ BIN_DIR="$WORK/pdftract-v${VERSION}-${ARCH}-unknown-linux-musl"
 # the one thing that gate cannot do: a real binary the binary-gated suites
 # can resolve. /pdftract-bin is read-only; the tests only ever execute the
 # binary and read its output.
-echo "== running: swift test --skip ProcessLifecycleTests (with pdftract v${VERSION} on PATH)"
+echo "== running: swift test (with pdftract v${VERSION} on PATH)"
 set +e
 docker run --rm \
     -v "$TARGET":/workspace \
@@ -131,7 +131,7 @@ docker run --rm \
     -v "$BIN_DIR":/pdftract-bin:ro \
     -w /workspace \
     "$IMAGE" \
-    bash -c 'export PATH=/pdftract-bin:$PATH; swift test --skip ProcessLifecycleTests' \
+    bash -c 'export PATH=/pdftract-bin:$PATH; swift test' \
     2>&1 | tee "$WORK/test-output.log"
 STATUS=${PIPESTATUS[0]}
 set -e

@@ -17,14 +17,21 @@
 # uses, so local verdicts match the CI gate's verdicts.
 #
 # Modes:
-#   scripts/definition-of-done.sh          full CI-gate mirror:
-#                                          swift test --skip ProcessLifecycleTests
+#   scripts/definition-of-done.sh          full CI-gate mirror: swift test
 #   scripts/definition-of-done.sh --fast   compile-only: swift build --build-tests
 #
-# `--skip ProcessLifecycleTests` mirrors the iad-ci gate (b947d7a35, live
-# 2026-11-25T03:00Z): the suite's process-spawn/cancellation assertions time
-# out in containerized environments — an environment limitation, not a
-# regression signal (3/6 fail at unchanged repo content in this image).
+# `--skip ProcessLifecycleTests` is GONE (pdfswift-b64f41eb, 2026-11-25):
+# the suite failed 3/6 in docker-class containers because its fake binaries
+# were shell scripts whose forked `sleep` outlived the SIGTERM-killed shell
+# while holding the stdout/stderr pipe write ends — the SDK's drains blocked
+# on EOF for the sleep's full budget, so cancelled/timed-out calls could not
+# return inside the tests' watchdogs. The fake binaries now redirect the
+# sleep's output to /dev/null and the drop-before-launch test asserts the
+# safety property (child reaped) instead of the racy "no spawn" — the whole
+# target passes in this image, and the suite runs in ~5s instead of ~130s.
+# The iad-ci `pdftract-swift-build` gate template still carries the `--skip`
+# (declarative-config b947d7a35) pending a template update there; this
+# script is the stricter verifier until then.
 #
 # `.build` is shadowed with an anonymous container volume so the container's
 # root-owned build artifacts never land in the directory being verified
@@ -39,7 +46,7 @@ cd "$(dirname "$0")/.."
 IMAGE=swift:5.10-jammy
 
 case "${1:-}" in
-    "")        COMMAND="swift test --skip ProcessLifecycleTests" ;;
+    "")        COMMAND="swift test" ;;
     --fast)    COMMAND="swift build --build-tests" ;;
     *)         echo "usage: $0 [--fast]" >&2; exit 2 ;;
 esac

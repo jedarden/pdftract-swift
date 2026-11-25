@@ -7,16 +7,23 @@ generator" half of that instruction. This guide is **hand-written** and lives
 under `docs/notes/` precisely because it is not generator output and must
 survive every refresh.
 
-Last verified against pdftract main (`ae0a158d`, pdfswift-215641c8's
-Sendable/concurrency-safety drop — README/Types/Methods/Errors template
-edits plus the sdk-contract client-shareability block, on the still-unlanded
-local main above `5dcc52ec` + `ab720d47` + `a2ed4c967` + `12c63b65`) on
-2026-11-25: a fresh `pdftract sdk codegen --lang swift --version 1.2.0`
-reproduces all nine generated paths in this repo byte-for-byte, and
-`sdk validate` reports no `MODIFIED`/`MISSING` under any generated path (only
-the usual README 0.1.0-comparison artifact). The drop compiles on
-swift:5.10-jammy and the full test target minus `ProcessLifecycleTests`
-passes (34 tests, 0 failures, 6 binary-dependent skips).
+Last verified against pdftract main (lineage tip `0317c180`, pdfswift-b64f41eb's
+lifecycle drop — SIGTERM-unblocking spawn, drain-before-reap buffered exec,
+container-proof lifecycle fakes, safety-only drop tests) on 2026-11-25
+(pdfswift-10bba538): a fresh `pdftract sdk codegen --lang swift --version 1.2.0`
+run from the pdftract checkout root reproduces `GENERATED`, `Package.swift`,
+`Sources/Pdftract/Pdftract.swift`, `Sources/PdftractCodegen/Errors.swift`,
+`Tests/PdftractTests/ConformanceTests.swift`, and `.codegen-version`
+byte-for-byte, and reproduces `Methods.swift` except for the password path.
+Known, deliberate drift in both directions: `Methods.swift` and `Types.swift`
+carry the password field/`--password-stdin` transport in this tree whose
+template port has not landed (pdfswift-9359c9ca — re-inventory parity before
+the next refresh drop), and `README.md` carries tree-ahead sections — never
+copy a regen README over the tree. The drop compiles on swift:5.10-jammy and
+the full test target passes (pdfswift-215641c8's 34 tests plus the 6
+`ProcessLifecycleTests` plus the 6 `ProcessLifecycleCancellationTests`
+lifecycle-harness tests; binary-dependent suites skip without a binary on
+PATH).
 
 ## Where the generated output comes from
 
@@ -81,9 +88,10 @@ The one hard rule that follows: **test code must never be merged into
 into the generated file compiles and passes — until the next refresh
 silently clobbers it. Regeneration rewrites the file from the template, the
 merged tests vanish, and the gate stays green, because absent tests fail
-nothing: the gate is now the whole target minus `ProcessLifecycleTests`
-(`swift test --skip ProcessLifecycleTests`, CI map below), which has no
-notion of a suite that used to exist. Nothing detects the loss. (While the
+nothing: the gate is now the whole target (minus `ProcessLifecycleTests` in
+the iad-ci gate template only — `--skip`, CI map below — which has no
+notion of a suite that used to exist; the local DoD script runs the full
+target). Nothing detects the loss. (While the
 merge exists, validate does flag it as
 `MODIFIED: Tests/PdftractTests/ConformanceTests.swift` drift — but validate
 runs at refresh time, exactly when the clobber lands, so it never stands
@@ -188,10 +196,11 @@ pdftract sdk validate --lang swift --sdk-dir ~/pdftract-swift
 #    pdfswift-8f868708 XCTSkip guards, every binary-dependent test skips
 #    cleanly when no pdftract binary is on PATH, so a binary-less
 #    environment exercises the conformance and stream suites without a
-#    --filter. One caveat: in docker-class containers ProcessLifecycleTests
-#    fails 3/6 for environment reasons unrelated to any drop (pre-existing;
-#    cancellation and timeouts never reach the spawned child there) — see
-#    the CI map below before reading an unfiltered container run:
+#    --filter. The whole target passes unfiltered in docker-class containers
+#    too, including ProcessLifecycleTests (pdfswift-b64f41eb fixed the fake
+#    binaries whose orphaned forked `sleep` held the pipes open — the
+#    pre-existing 3/6 container failures were a harness artifact, not an
+#    SDK defect):
 cd ~/pdftract-swift
 swift build && swift build --build-tests
 swift test
@@ -508,7 +517,7 @@ history:
 
 | When | Workflow (iad-ci) | What it does |
 |---|---|---|
-| Every push to `main` | `pdftract-swift-build` | `swift build` + `swift build --build-tests` on `swift:5.10-jammy`, then `swift test --skip ProcessLifecycleTests` — the whole test target minus one suite. This is the expanded gate from declarative-config `b947d7a35` (live 2026-11-25): the old `--filter 'StreamingStderrRegressionTests\|ExitCodeMappingTests'` predates the pdfswift-8f868708 XCTSkip guards, which made the binary-dependent conformance suites skip cleanly and removed the reason for the filter. A regenerated drop that breaks either compile step, or regresses any surviving suite (stderr draining, exit-code mapping, argv/bytes passthrough, receipts), fails here. The `--skip` exists for a pre-existing, environment-specific reason: `ProcessLifecycleTests` fails 3/6 in docker-class containers (observed identically on the pre-guard tree, 2026-11-25 — cancel/timeout/drop-before-iteration; cancellation and timeouts don't reach the spawned child in that environment). Drop the `--skip` when pdfswift-b64f41eb lands. |
+| Every push to `main` | `pdftract-swift-build` | `swift build` + `swift build --build-tests` on `swift:5.10-jammy`, then `swift test --skip ProcessLifecycleTests` — the whole test target minus one suite. This is the expanded gate from declarative-config `b947d7a35` (live 2026-11-25): the old `--filter 'StreamingStderrRegressionTests\|ExitCodeMappingTests'` predates the pdfswift-8f868708 XCTSkip guards, which made the binary-dependent conformance suites skip cleanly and removed the reason for the filter. A regenerated drop that breaks either compile step, or regresses any surviving suite (stderr draining, exit-code mapping, argv/bytes passthrough, receipts), fails here. The `--skip` is now conservative, not load-bearing: the suite's container failures were a test-harness artifact (fake binaries were shell scripts whose forked `sleep` survived the SIGTERM-killed shell holding the pipe write ends, wedging the SDK's drains — pdfswift-b64f41eb fixed the harness upstream, template `c639bf9c`, and the whole target passes in this image), and the local DoD + e2e gates run the full target since then. The gate template's `--skip` still needs a declarative-config change to drop. |
 | Planned | `codegen-drift-gate` step in `pdftract-swift-build` | **Implemented but not live.** The step exists on declarative-config branch `pdfswift-5efd262c/codegen-drift-gate` (tip `42c0432d1`, pushed to Forgejo; branch is tracked by no ArgoCD app, so live CI is unaffected) and is deliberately **not** merged: it resolves the generator ref from `.codegen-version` (release v1.2.0 today), and against that reference the step would be permanently red — the tree's generated content is ahead of every ref a CI checkout can resolve (the provenance split tracked by pdfswift-4ea674f4), i.e. the "staleness looks like tampering" case above as a standing condition. The step is already scoped against the exit-code trap this page documents: validate runs from the generator checkout root (the CWD requirement), the script **ignores validate's exit status** and fails only on `MODIFIED`/`MISSING` findings after filtering all `EXTRA` noise and excluding exactly the benign `MODIFIED: README.md` artifact — so a clean repo passes — plus a byte-exact regenerate-and-diff over all nine generated paths that closes validate's two blind spots (README content drift, a `.codegen-version` that doesn't match the tree). A third check asserts **hand-written source survival** (pdfswift-40c6ea8b): every `.swift` under `Sources/` outside the four generated `Sources/` paths is re-verified byte-identical after a simulated refresh of a tree copy — the mechanical half of the hand-written-source policy above; a no-op until a shim lands (the list is empty today), and the fence that makes a future template emitting a colliding path fail CI instead of silently clobbering the file. Merge trigger: the swift-template lineage lands upstream and the drop is refreshed from the resulting release (pdfswift-5efd262c's recovery path). |
 | pdftract release `N` | `pdftract-swift-publish` (via `pdftract-release-cascade`) | **Not firing** — the cascade's `sdk-swift-publish` slot is hard-off (`when: 'false'`), so pdftract releases do **not** auto-tag this SDK; releases are cut manually per `docs/notes/sdk-release-runbook.md`. The template, if ever enabled as written, clones GitHub directly and tags `N` numerically — four defects to reconcile first, listed in the runbook. |
 
@@ -527,9 +536,10 @@ XCTSkip when the client's PATH scan would find nothing (the same guard
 every pdftract build answers with exit 0. Bare `swift test` in a binary-less
 environment now exercises every suite — the real-binary ones skip cleanly,
 the fake/stub ones run — so compile-verification is no longer the only thing
-such a run can tell you. The one remaining binary-less failure set is
-pre-existing and unrelated to any drop: `ProcessLifecycleTests` fails 3/6 in
-docker-class containers (see the CI map above).
+such a run can tell you. (The last binary-less failure set, `ProcessLifecycleTests`
+failing 3/6 in docker-class containers, was a harness artifact — orphaned
+forked `sleep`s in the fake binaries holding the pipes open — fixed by
+pdfswift-b64f41eb; the whole target now passes unfiltered in this image.)
 
 ## Platform coverage: macOS 13+ is declared-but-untested
 
@@ -578,7 +588,7 @@ result like the CI proof beads do (commit SHA, exact commands, exit codes):
 ```bash
 # fresh checkout or `git archive HEAD` extraction of the tagged release
 swift build && swift build --build-tests   # compile both targets
-swift test --skip ProcessLifecycleTests    # the same expanded gate CI runs
+swift test                                 # full target, lifecycle suite included
 # with a real pdftract release binary on PATH (expect this to be red until
 # the upstream `;`-split fix lands and a drop picks it up — discovery is the
 # known-broken path):
