@@ -127,7 +127,12 @@ final class ExtractOptionsPasswordPassthroughTests: XCTestCase {
             .appendingPathComponent("pdftract-password-fixture-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        guard let bytes = Data(base64Encoded: Self.encryptedFixtureBase64) else {
+        // .ignoreUnknownCharacters because the constant is a multi-line
+        // literal: Foundation's strict base64 decode rejects the line breaks.
+        guard let bytes = Data(
+            base64Encoded: Self.encryptedFixtureBase64,
+            options: .ignoreUnknownCharacters
+        ) else {
             XCTFail("embedded encrypted-fixture base64 failed to decode")
             throw NSError(domain: "fixture", code: 1)
         }
