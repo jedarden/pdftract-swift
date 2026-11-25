@@ -744,6 +744,105 @@ try await Task.sleep(for: .seconds(30))
 task.cancel() // child terminated and reaped if still running
 ```
 
+## Execution model
+
+Every SDK method call spawns a fresh `pdftract` child process. There is no
+daemon, no long-lived worker, and no connection to reuse between calls — the
+SDK does not link the pdftract engine into your program; it shells out to the
+binary every time. The buffered methods (`extract`, `extractText`,
+`extractMarkdown`, `getMetadata`, `hash`, `classify`, `verifyReceipt`) spawn
+the binary, wire stdout/stderr pipes, wait for exit, and tear the child down;
+the streaming methods (`extractStream`, `search`) do the same but read the
+child's stdout line by line instead of buffering it. Nothing is shared
+between calls except the memoized PATH scan described under
+[Concurrency](#concurrency).
+
+### What a call costs
+
+A call's wall time is a fixed term (process spawn + binary startup) plus the
+actual extraction, which scales with the document. The table below times the
+pinned 1.2.0 binary invoked directly on one 12-core Linux server (an SDK call
+adds a small constant on top — argument build, pipe drain, JSON decode — the
+child process dominates):
+
+| Invocation | Median wall time |
+|---|---|
+| spawn + startup only (`pdftract --version`) | 0.5 ms |
+| `extract` — 4-page, 1.4 KB PDF | 1.3 ms |
+| `extract` — 1-page, 6 MB image-heavy PDF | 8 ms |
+| `extract` — 100-page, 1 MB PDF | 330 ms |
+
+The fixed term is sub-millisecond and constant — it does not grow with the
+document — so a real extraction amortizes it into noise (0.15% of the
+100-page call), while a trivial one pays it as a visible fraction (about 40%
+of the 4-page call). Your absolute numbers will differ; the shape — fixed
+spawn term, document-scaled extraction — is what holds everywhere.
+
+The buffered methods also hold the child's entire stdout in memory before
+decoding it, so peak memory in *your* process includes the raw JSON document
+alongside the decoded result. `extractStream` and `search` read line by line
+instead (see [Stream extraction](#stream-extraction-for-large-pdfs)).
+
+### No result cache between calls
+
+The CLI has an opt-in on-disk result cache (`--cache-dir`), but the SDK never
+passes it — `ExtractOptions` exposes no cache field — so every SDK call is a
+cold extraction, even for a document extracted moments earlier by the same
+client. Extracting the same file twice through the SDK does the work twice.
+
+### Concurrent calls
+
+The SDK imposes no concurrency limit: no pool, no queue, no semaphore. N
+concurrent calls — a task group, parallel request handlers in your service —
+become N simultaneous `pdftract` processes, and the parallelism is real: on
+the server above, 16 concurrent extractions of the 4-page PDF took ~5 ms of
+wall time versus ~24 ms run serially. Two resources scale with the number of
+in-flight calls:
+
+- **Memory.** Each child carries its own state — ~7 MB RSS just to start,
+  ~19 MB for the 100-page extraction above, more for larger documents — so
+  peak memory is roughly calls-in-flight × per-call footprint, on top of the
+  raw JSON the buffered methods hold in your process while decoding. The SDK
+  adds no backpressure: bound concurrency yourself (a bounded task-group
+  helper, an actor-based semaphore, or your server's worker count) sized to
+  cores and memory. Overload does not queue — it surfaces as children killed
+  by the kernel (a `PdftractError` carrying the kill's exit status) or spawn
+  failures (exit code `-1`).
+- **File descriptors.** Each in-flight call holds two pipes until the child
+  exits; thousands in flight can run into the process fd limit.
+
+### When to prefer `pdftract serve`
+
+For high-throughput workloads — sustained calls per second, high
+concurrency, or the same documents extracted repeatedly — run the binary's
+`serve` subcommand and speak HTTP to it directly (wire format under
+[Platform Support](#platform-support)). The SDK cannot talk to a `serve`
+instance: no SDK method speaks HTTP, and a `.url` source is fetched by the
+*binary* as PDF input, never routed to a server. `serve` removes exactly the
+costs above:
+
+- **One process, not one per call.** Extraction runs inside the long-lived
+  server process on managed thread pools (requests on tokio's blocking pool,
+  pages of one document in parallel on rayon), so there is no fork/exec per
+  request and no per-call process teardown.
+- **A shared result cache.** `serve --cache-dir DIR` (size capped by
+  `--cache-size`, default 1 GiB) persists extraction results across requests
+  *and* server restarts; a repeated document is served from cache without
+  re-extraction, reported as `X-Pdftract-Cache: hit` and a `metadata.cache_status`
+  of `"hit"`. The CLI's cache is opt-in per invocation and the SDK never
+  enables it (see [No result cache between calls](#no-result-cache-between-calls)),
+  so this warm path exists only behind `serve`.
+- **Concurrency handled for you.** In-flight work is bounded by the server's
+  thread pools instead of one process per caller.
+
+The trade-offs: `serve` has no built-in authentication, TLS, or rate
+limiting — bind it to loopback or a private interface and terminate auth at
+a reverse proxy (see [Platform Support](#platform-support)) — and callers
+exchange typed Swift results for HTTP multipart. A workable rule of thumb:
+occasional extractions, per-call `timeout:`/cancellation, typed decoding —
+use the SDK. A shared extraction service for many callers, high volume, or
+repeated documents — run `serve`.
+
 ## Concurrency
 
 A single `Pdftract` instance may be shared across concurrency domains. The
@@ -774,6 +873,11 @@ What makes that safe:
 - **The one shared cache is thread-safe.** The PATH scan that resolves the
   `pdftract` binary runs at most once per process and is memoized in a
   `static let`, whose initializer Swift runs atomically and exactly once.
+
+Those bullets are about *safety*. The throughput implications of the same
+model — per-call spawn cost, no result cache, no concurrency limit, and when
+`pdftract serve` fits better — are covered in
+[Execution model](#execution-model).
 
 Everything the SDK hands back crosses concurrency domains just as freely —
 models, options, and errors are all `Sendable`:
