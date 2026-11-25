@@ -27,7 +27,64 @@ Swift SDK for pdftract - PDF extraction and analysis for server-side Swift.
 **Supported**: macOS 13+, Linux (server-side use only)
 **Unsupported**: iOS (Apple does not allow spawning subprocesses in App Store apps)
 
-> **Note for iOS users**: Use `pdftract serve` over HTTP from your iOS client. Run the server with the Swift SDK on a macOS/Linux backend and make HTTP requests from your iOS app.
+**Using pdftract from an iOS app**: the SDK drives the `pdftract` binary by
+spawning it as a subprocess, which iOS forbids in App Store apps — so the SDK
+cannot run inside an iOS app, and none of its APIs start a server. The
+supported pattern runs the pdftract binary's own `serve` subcommand on a
+macOS/Linux backend and calls it over HTTP from the app; the SDK is not
+involved on the iOS side.
+
+Start the server on the backend (binds `127.0.0.1:8080` by default; pass
+`--bind` to change):
+
+```bash
+pdftract serve
+```
+
+`serve` accepts the PDF as a `multipart/form-data` upload in a `file` field
+and returns the same JSON document envelope `pdftract extract --json` prints
+(`schema_version`, `fingerprint`, `metadata`, `pages`, `outline`, `errors`,
+...), with the server also filling `metadata.cache_status` and an
+`X-Pdftract-Cache` response header:
+
+```bash
+curl -F file=@document.pdf http://127.0.0.1:8080/extract
+```
+
+From the app, plain `URLSession` is enough — the only hand-rolled part is the
+multipart body:
+
+```swift
+let boundary = "pdftract.\(UUID().uuidString)"
+var request = URLRequest(url: URL(string: "https://pdftract.backend.example/extract")!)
+request.httpMethod = "POST"
+request.setValue("multipart/form-data; boundary=\(boundary)",
+                 forHTTPHeaderField: "Content-Type")
+var body = Data()
+func part(_ s: String) { body.append(s.data(using: .utf8)!) }
+part("--\(boundary)\r\n")
+part("Content-Disposition: form-data; name=\"file\"; filename=\"document.pdf\"\r\n")
+part("Content-Type: application/pdf\r\n\r\n")
+body.append(pdfData)                       // the PDF bytes to extract
+part("\r\n--\(boundary)--\r\n")
+request.httpBody = body
+let (data, _) = try await URLSession.shared.data(for: request)
+// `data` decodes to the document envelope: `pages`, `metadata`, ...
+```
+
+Other endpoints: `POST /extract/text` (plain text), `POST /extract/stream`
+(NDJSON frames), and `GET /health` (`{"status":"ok","version":"..."}`).
+Optional form fields mirror the extract flags: `pages`, `ocr_language`,
+`ocr_dpi`, `full_render`, `markdown_anchors`, `receipts`, `no_cache`, and
+`max_decompress_gb`. Errors return a 4xx/5xx status with a JSON body of
+`error`, `message`, and optional `hint`.
+
+`serve` has no built-in authentication — bind it to loopback or a private
+interface and terminate auth at a reverse proxy before exposing it to
+devices (the CLI prints the same warning at startup). Cleartext `http://`
+from an iOS device also needs an App Transport Security exception, which is
+one more reason to put HTTPS in front of the server. Run `pdftract serve
+--help` on the backend for the full option list.
 
 ## Installation
 
@@ -156,6 +213,25 @@ for try await match in client.search(.path("document.pdf"), "invoice") {
 `match.page` is a **zero-based** page index — the same convention as
 `Page.pageIndex` in `extractStream` — so the document's first page is page `0`.
 Human-readable page numbers are `match.page + 1`.
+
+### Flag-like paths and patterns
+
+Values the SDK hands to the pdftract CLI are never misparsed as CLI flags,
+even when they begin with `-`. Every method separates the CLI's own options
+from caller-supplied values with the conventional end-of-options marker `--`,
+so a file literally named `-report.pdf`, a search pattern like `-5%`, a URL,
+and a receipt path all reach the CLI verbatim as positional values. On the
+command line the same invocations read
+`pdftract extract --json -- -report.pdf` and
+`pdftract grep -- -5% document.pdf`.
+
+Without that separator the CLI's flag parser would claim such values: with
+the released CLI, `grep -js` is parsed as `--threads` with the value `s` (a
+usage error), and a bare `-i` pattern would silently flip case-sensitivity
+instead of being searched for. Nothing is rejected and nothing needs escaping
+on your side — the separator is always emitted, so behavior does not depend
+on the value. The same rule covers `Source.bytes` (whose spill path the SDK
+controls), `.url` values, and the two positional paths of `verifyReceipt`.
 
 ### Get metadata
 
