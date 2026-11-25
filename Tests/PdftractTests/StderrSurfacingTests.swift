@@ -86,11 +86,16 @@ final class StderrSurfacingTests: XCTestCase {
     }
 
     /// Writes an executable stub `pdftract` that records its shell pid in a
-    /// pidfile, writes one marker line to stderr, then sleeps far past the
-    /// test's `timeout:` — so only the SDK's deadline machinery can end it.
-    /// Mirrors the fake binaries in ProcessLifecycleTests; the pidfile lets
-    /// the test SIGKILL any leftover child so a failure path can never leak a
-    /// sleeper into later suites.
+    /// pidfile, writes one marker line to stderr, then sleeps past the test's
+    /// `timeout:` — so only the SDK's deadline machinery can end it. Mirrors
+    /// the fake binaries in ProcessLifecycleTests; the pidfile lets the test
+    /// SIGKILL any leftover child so a failure path can never leak a sleeper
+    /// into later suites. The sleep is 5s, not that suite's 60s: this suite
+    /// runs in the CI gate (which skips the lifecycle suite), and the gate's
+    /// containerized environment is one where SIGTERM does not end the child
+    /// (the known ProcessLifecycleTests limitation), so the worst case is the
+    /// full sleep — 5s bounds it while still leaving the 1s deadline 5×
+    /// margin to fire first.
     private static func writeSleepingStubBinary() throws -> (directory: URL, binaryPath: String, pidPath: String) {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdftract-stderr-surfacing-\(UUID().uuidString)", isDirectory: true)
@@ -102,7 +107,7 @@ final class StderrSurfacingTests: XCTestCase {
         var script = "#!/bin/sh\n"
         script += "echo $$ > '\(pidPath)'\n"
         script += "echo '\(timeoutStderrMarker)' >&2\n"
-        script += "sleep 30\n"
+        script += "sleep 5\n"
         script += "exit 0\n"
 
         try script.write(toFile: binaryPath, atomically: true, encoding: .utf8)
@@ -112,7 +117,7 @@ final class StderrSurfacingTests: XCTestCase {
 
     /// SIGKILLs a leftover sleeping stub, if any. Belt and braces for the
     /// failure path: a test that fails before the SDK's deadline fired must
-    /// not leave a 30-second sleeper behind.
+    /// not leave a sleeper behind.
     private static func killStub(pidPath: String) {
         guard let pidString = try? String(contentsOfFile: pidPath, encoding: .utf8),
               let pid = Int32(pidString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
