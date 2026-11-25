@@ -47,10 +47,12 @@ Everything else in the repo (`docs/`, `notes/`, `LICENSE`, `.gitignore`, this
 file) is hand-written and survives regeneration untouched — verified:
 codegen pointed at a populated repo root only rewrites the nine paths above.
 That "everything else" explicitly includes the hand-written test suites
-sitting in `Tests/PdftractTests/` next to the generated one — see the next
-section. Note that `README.md` and `Package.swift` are generated too, even
-though they read like prose/config: **hand-edits to them are drift and get
-reverted by the next refresh.**
+sitting in `Tests/PdftractTests/` next to the generated one, and any
+hand-written **source** file under `Sources/Pdftract/` — the sanctioned
+location for compatibility shims like the ADR-1 lowerCamelCase shim. Each
+has its own section below. Note that `README.md` and `Package.swift` are
+generated too, even though they read like prose/config: **hand-edits to
+them are drift and get reverted by the next refresh.**
 
 ### Hand-written test files live beside the generated suite
 
@@ -94,6 +96,63 @@ keep them — the fix goes in the upstream template first (see "Fixing a bug
 in generated code" below), then a regeneration carries it here, exactly as
 pdfswift-6bc41168 did for the stderr-drain regression. Never merge it in
 locally.
+
+### Hand-written source files live beside the generated wrapper
+
+The same contract covers hand-written **source** files, and there is
+exactly one sanctioned location for them: a new `.swift` file under
+`Sources/Pdftract/`, beside the generated wrapper `Pdftract.swift` — e.g.
+`Sources/Pdftract/CompatibilityShim.swift`. This is where the ADR-1
+lowerCamelCase shim actually lived (bf-b6j, `6e19810d`:
+`Sources/Pdftract/CompatibilityAPI.swift`, 2026-07-22 09:41→11:03, from add
+to bf-1b5's native-lowerCamelCase drop; retiring a shipped shim is a
+release event per `docs/notes/sdk-release-runbook.md`).
+
+- **Why this location works, mechanically.** `Package.swift` declares its
+  targets by name only, so SwiftPM's default layout compiles every `.swift`
+  under `Sources/Pdftract/` recursively: a new hand-written file joins the
+  `Pdftract` target and the standard `swift build` gate with **no manifest
+  change** (verified 2026-11-25: a planted shim compiles under
+  swift:5.10-jammy, `swift build` exit 0). The wrapper re-exports the
+  client surface via `@_exported import PdftractCodegen` plus typealiases,
+  so a `public extension` defined in module `Pdftract` is visible to every
+  consumer through plain `import Pdftract` — exactly the forwarding-shim
+  shape the ADR-1 shim used. One verified gotcha: `@_exported` re-exports
+  API, not the generated file's *imports* — a shim mirroring generated
+  signatures that mention `TimeInterval`/`URL` needs its own
+  `import Foundation`, or it fails to compile with
+  `cannot find type 'TimeInterval' in scope`.
+- **Never `Sources/PdftractCodegen/`.** All three of that target's files
+  are generated paths; keep the directory exactly the emitted set so "is
+  this file generated?" stays answerable by path alone. A hand-written
+  file placed there would still compile and still survive — validate
+  reports it `EXTRA` like any other hand-written file — but it muddies the
+  contract for zero benefit.
+- **Refresh survival — verified, and mechanically asserted.** The
+  generator rewrites exactly the nine emitted paths and never deletes or
+  rewrites a path it does not emit. Verified 2026-11-25 with a hash census
+  over all 90 files of a tree carrying a planted probe file in each
+  `Sources/` subdirectory: refreshing a stale tree rewrote only the stale
+  generated paths (`Types.swift` and `Methods.swift`, the pending
+  `--`-separator drop) and left both planted files byte-identical;
+  re-running the refresh on the already-current tree changed nothing at
+  all. The `codegen-drift-gate` step's regenerate-and-diff asserts this
+  (see the CI map): every `.swift` under `Sources/` outside the nine
+  generated paths must be byte-identical after a simulated refresh, so a
+  future template that starts emitting a colliding path fails CI instead
+  of silently clobbering the file.
+- **`sdk validate` tolerates the extra file.** An extra `.swift` under
+  `Sources/` surfaces as `EXTRA: Sources/Pdftract/<name>.swift` — the
+  benign kind, same as `docs/`. Verified 2026-11-25: with probe files
+  planted in both subdirectories, validate reported `EXTRA` for both, the
+  `MODIFIED` set stayed exactly the benign `README.md` artifact, and the
+  machine-evaluable residue grep under "Interpreting results" stayed
+  empty — a correct drop with hand-written source files present still
+  reads as a pass.
+- The test section's hard rule applies verbatim to source: **never merge
+  shim code into a generated file** (`Sources/PdftractCodegen/*.swift` or
+  `Sources/Pdftract/Pdftract.swift`). Merged-in code compiles and passes
+  until the next refresh silently reverts it.
 
 ## Refresh procedure
 
@@ -295,7 +354,7 @@ history:
 | When | Workflow (iad-ci) | What it does |
 |---|---|---|
 | Every push to `main` | `pdftract-swift-build` | `swift build` + `swift build --build-tests` on `swift:5.10-jammy`, then `swift test --skip ProcessLifecycleTests` — the whole test target minus one suite. This is the expanded gate from declarative-config `b947d7a35` (live 2026-11-25): the old `--filter 'StreamingStderrRegressionTests\|ExitCodeMappingTests'` predates the pdfswift-8f868708 XCTSkip guards, which made the binary-dependent conformance suites skip cleanly and removed the reason for the filter. A regenerated drop that breaks either compile step, or regresses any surviving suite (stderr draining, exit-code mapping, argv/bytes passthrough, receipts), fails here. The `--skip` exists for a pre-existing, environment-specific reason: `ProcessLifecycleTests` fails 3/6 in docker-class containers (observed identically on the pre-guard tree, 2026-11-25 — cancel/timeout/drop-before-iteration; cancellation and timeouts don't reach the spawned child in that environment). Drop the `--skip` when pdfswift-b64f41eb lands. |
-| Planned | `codegen-drift-gate` step in `pdftract-swift-build` | **Implemented but not live.** The step exists on declarative-config branch `pdfswift-5efd262c/codegen-drift-gate` (tip `3490164b3`, pushed to Forgejo; branch is tracked by no ArgoCD app, so live CI is unaffected) and is deliberately **not** merged: it resolves the generator ref from `.codegen-version` (release v1.2.0 today), and against that reference the step would be permanently red — the tree's generated content is ahead of every ref a CI checkout can resolve (the provenance split tracked by pdfswift-4ea674f4), i.e. the "staleness looks like tampering" case above as a standing condition. The step is already scoped against the exit-code trap this page documents: validate runs from the generator checkout root (the CWD requirement), the script **ignores validate's exit status** and fails only on `MODIFIED`/`MISSING` findings after filtering all `EXTRA` noise and excluding exactly the benign `MODIFIED: README.md` artifact — so a clean repo passes — plus a byte-exact regenerate-and-diff over all nine generated paths that closes validate's two blind spots (README content drift, a `.codegen-version` that doesn't match the tree). Merge trigger: the swift-template lineage lands upstream and the drop is refreshed from the resulting release (pdfswift-5efd262c's recovery path). |
+| Planned | `codegen-drift-gate` step in `pdftract-swift-build` | **Implemented but not live.** The step exists on declarative-config branch `pdfswift-5efd262c/codegen-drift-gate` (tip `42c0432d1`, pushed to Forgejo; branch is tracked by no ArgoCD app, so live CI is unaffected) and is deliberately **not** merged: it resolves the generator ref from `.codegen-version` (release v1.2.0 today), and against that reference the step would be permanently red — the tree's generated content is ahead of every ref a CI checkout can resolve (the provenance split tracked by pdfswift-4ea674f4), i.e. the "staleness looks like tampering" case above as a standing condition. The step is already scoped against the exit-code trap this page documents: validate runs from the generator checkout root (the CWD requirement), the script **ignores validate's exit status** and fails only on `MODIFIED`/`MISSING` findings after filtering all `EXTRA` noise and excluding exactly the benign `MODIFIED: README.md` artifact — so a clean repo passes — plus a byte-exact regenerate-and-diff over all nine generated paths that closes validate's two blind spots (README content drift, a `.codegen-version` that doesn't match the tree). A third check asserts **hand-written source survival** (pdfswift-40c6ea8b): every `.swift` under `Sources/` outside the four generated `Sources/` paths is re-verified byte-identical after a simulated refresh of a tree copy — the mechanical half of the hand-written-source policy above; a no-op until a shim lands (the list is empty today), and the fence that makes a future template emitting a colliding path fail CI instead of silently clobbering the file. Merge trigger: the swift-template lineage lands upstream and the drop is refreshed from the resulting release (pdfswift-5efd262c's recovery path). |
 | pdftract release `N` | `pdftract-swift-publish` (via `pdftract-release-cascade`) | **Not firing** — the cascade's `sdk-swift-publish` slot is hard-off (`when: 'false'`), so pdftract releases do **not** auto-tag this SDK; releases are cut manually per `docs/notes/sdk-release-runbook.md`. The template, if ever enabled as written, clones GitHub directly and tags `N` numerically — four defects to reconcile first, listed in the runbook. |
 
 Both templates live in `jedarden/declarative-config` under
