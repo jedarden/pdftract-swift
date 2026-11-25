@@ -582,7 +582,18 @@ public struct Pdftract: Sendable {
                     // request arrives through the onTermination handler
                     // registered in the build closure above, so it covers a
                     // drop that happened before this producer even ran.
-                    guard !spawned.isStopRequested() else { return }
+                    guard !spawned.isStopRequested() else {
+                        // The sequence was dropped before this producer ran
+                        // (the unclaimed sequence deinit's terminate-only
+                        // action landed as a stop request). No consumer is
+                        // parked on a dropped sequence, but the stream must
+                        // still finish: the producer task owns the stream's
+                        // storage through the continuation, so returning
+                        // without finishing would keep that storage alive
+                        // forever.
+                        continuation.finish()
+                        return
+                    }
 
                     try Self.runWithDeliverableTermination(process)
                     spawned.didLaunch(process)
@@ -770,7 +781,18 @@ public struct Pdftract: Sendable {
                     // request arrives through the onTermination handler
                     // registered in the build closure above, so it covers a
                     // drop that happened before this producer even ran.
-                    guard !spawned.isStopRequested() else { return }
+                    guard !spawned.isStopRequested() else {
+                        // The sequence was dropped before this producer ran
+                        // (the unclaimed sequence deinit's terminate-only
+                        // action landed as a stop request). No consumer is
+                        // parked on a dropped sequence, but the stream must
+                        // still finish: the producer task owns the stream's
+                        // storage through the continuation, so returning
+                        // without finishing would keep that storage alive
+                        // forever.
+                        continuation.finish()
+                        return
+                    }
 
                     try Self.runWithDeliverableTermination(process)
                     spawned.didLaunch(process)
@@ -1190,12 +1212,15 @@ private final class SpawnedProcess: @unchecked Sendable {
 /// releases its iterator when the loop exits — by `break`, early return,
 /// thrown error, or completion — and this iterator is a class, so its
 /// `deinit` runs the cleanup right there. Dropping the sequence before ever
-/// iterating runs the same cleanup through the sequence's own `deinit`.
-/// Cancelling the consuming Task still goes through the inner stream's
-/// `onTermination`. All three paths funnel through one idempotent `Cleanup`
-/// (terminate-only; reaping stays with the producer's post-EOF `reap()` —
-/// see the lifecycle comments in the streaming methods), so whichever exit
-/// happens first terminates the child and the rest are no-ops.
+/// iterating runs the same cleanup through the sequence's own `deinit` —
+/// claim-gated, because a `for` loop itself releases the sequence the
+/// instant its iterator exists, and that normal handoff must not read as a
+/// drop (see `Cleanup`). Cancelling the consuming Task still goes through
+/// the inner stream's `onTermination`. All three paths funnel through one
+/// idempotent `Cleanup` (terminate-only; reaping stays with the producer's
+/// post-EOF `reap()` — see the lifecycle comments in the streaming
+/// methods), so whichever exit happens first terminates the child and the
+/// rest are no-ops.
 public final class PdftractStream<Element: Sendable>: AsyncSequence {
     public typealias Element = Element
 
@@ -1210,9 +1235,19 @@ public final class PdftractStream<Element: Sendable>: AsyncSequence {
         self.cleanup = cleanup
     }
 
-    deinit { cleanup.run() }
+    deinit { cleanup.runOnceIfUnclaimed() }
 
     public func makeAsyncIterator() -> AsyncIterator {
+        // Claim BEFORE the iterator exists: the for-loop expression releases
+        // the sequence the moment the iterator is created, and that release
+        // is a handoff, not a drop — the drop-cleanup below must not fire on
+        // a stream that is about to be consumed (observed live on
+        // swift:5.10-jammy, 2026-11-25: without the claim, every plain
+        // drain-to-completion loop stopped the producer before its launch,
+        // and the consumer parked in `next()` forever). Once claimed, the
+        // iterator's `deinit` — which fires on every loop exit, `break`
+        // included — and the inner stream's `onTermination` own the cleanup.
+        cleanup.claim()
         return AsyncIterator(inner: inner.makeAsyncIterator(), cleanup: cleanup)
     }
 
@@ -1239,11 +1274,21 @@ public final class PdftractStream<Element: Sendable>: AsyncSequence {
 }
 
 /// Runs its action exactly once, however many owners race to release it.
-/// Every early exit of a `PdftractStream` (iterator deinit, sequence deinit,
-/// inner `onTermination`) lands here; the child termination must happen
-/// once, and repeats must stay no-ops.
+/// Every early exit of a `PdftractStream` lands here — the iterator's
+/// `deinit`, and the inner stream's `onTermination` — plus the sequence's
+/// own `deinit` when the sequence is dropped without ever being iterated;
+/// the child termination must happen once, and repeats must stay no-ops.
+///
+/// The sequence `deinit` is claim-gated (`claim()` / `runOnceIfUnclaimed()`):
+/// a `for` loop releases the sequence the instant its iterator exists, so a
+/// sequence deinit alone does not mean the sequence was abandoned — it is
+/// the normal handoff to the loop. Only an unclaimed release (the sequence
+/// dropped with no iterator ever created) is the drop the README's
+/// early-drop contract speaks of. The claim is set before the iterator is
+/// handed out, so the handoff's deinit always observes it.
 private final class Cleanup: @unchecked Sendable {
     private let lock = NSLock()
+    private var claimed = false
     private var done = false
     private let action: @Sendable () -> Void
 
@@ -1251,9 +1296,28 @@ private final class Cleanup: @unchecked Sendable {
         self.action = action
     }
 
+    /// Marks the sequence as handed to an iterator. After this, the
+    /// sequence's own `deinit` is a no-op: the iterator's `deinit` and the
+    /// inner stream's `onTermination` own the cleanup from here on.
+    func claim() {
+        lock.lock()
+        claimed = true
+        lock.unlock()
+    }
+
     func run() {
         lock.lock()
         let first = !done
+        done = true
+        lock.unlock()
+        if first { action() }
+    }
+
+    /// The sequence-deinit form: runs the action only when no iterator was
+    /// ever created — the sequence dropped before being iterated.
+    func runOnceIfUnclaimed() {
+        lock.lock()
+        let first = !done && !claimed
         done = true
         lock.unlock()
         if first { action() }
