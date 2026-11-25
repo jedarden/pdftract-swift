@@ -282,6 +282,9 @@ public struct Document: Codable, Sendable {
 /// Search result match.
 public struct Match: Codable, Sendable {
     public let text: String
+    /// Zero-based page index of the page containing the match — the same
+    /// convention as `Page.pageIndex`, so the document's first page is `0`.
+    /// Display human-readable page numbers as `page + 1`.
     public let page: Int
     public let bbox: [Double]
     public let context: Context

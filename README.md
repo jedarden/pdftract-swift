@@ -88,10 +88,14 @@ for await page in client.extractStream(.path("large.pdf")) {
 
 ```swift
 for await match in client.search(.path("document.pdf"), "invoice") {
-    print("Found on page \(match.page): \(match.text)")
+    print("Found on page \(match.page + 1): \(match.text)")
     print("  Context: ...\(match.context.before)[\(match.text)]\(match.context.after)...")
 }
 ```
+
+`match.page` is a **zero-based** page index — the same convention as
+`Page.pageIndex` in `extractStream` — so the document's first page is page `0`.
+Human-readable page numbers are `match.page + 1`.
 
 ### Get metadata
 

@@ -419,6 +419,36 @@ final class StreamingStderrRegressionTests: XCTestCase {
         XCTAssertEqual(outcome.valueCount, 3, "expected all 3 matches despite 128KiB of stderr")
     }
 
+    /// Pins the documented page-indexing convention for search matches: the
+    /// README's search section states `match.page` is zero-based — the same
+    /// convention as `Page.pageIndex` — and shows `match.page + 1` for
+    /// human-readable page numbers. The fake child emits the raw wire values
+    /// `page: 0,1,2`, so this assertion fails if the decode path shifts the
+    /// index (a `+1` here would make the docs lie about the wire contract) or
+    /// if the README and the code drift apart on the convention. Kept in sync
+    /// by construction: the fake's `matchLines` emits indices, not page
+    /// numbers, exactly what the wire format documents ("0-based page index;
+    /// human output flips to 1-based").
+    func testSearchMatchPageIsZeroBasedAsDocumented() async throws {
+        let fake = try Self.writeFakeBinary(
+            stdoutLines: Self.matchLines(count: 3),
+            trailingStderrMarker: false,
+            exitCode: 0
+        )
+        defer { try? FileManager.default.removeItem(at: fake.directory) }
+
+        let client = Pdftract(binaryPath: fake.binaryPath)
+        var pages: [Int] = []
+        for try await match in client.search(.path("/does/not/matter.pdf"), "needle") {
+            pages.append(match.page)
+        }
+
+        XCTAssertEqual(
+            pages, [0, 1, 2],
+            "Match.page must stay zero-based as documented (README: same convention as Page.pageIndex; display match.page + 1)"
+        )
+    }
+
     func testExtractStreamMapsCapturedStderrOnNonzeroExit() async throws {
         let fake = try Self.writeFakeBinary(
             stdoutLines: [],
