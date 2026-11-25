@@ -2,6 +2,26 @@
 
 Swift SDK for pdftract - PDF extraction and analysis for server-side Swift.
 
+> [!IMPORTANT]
+> **This repository is auto-generated.** The Swift sources, tests,
+> `Package.swift`, this README, and the root [`GENERATED`](GENERATED) marker
+> are all emitted by the codegen pipeline in
+> [jedarden/pdftract](https://git.ardenone.com/jedarden/pdftract)
+> (`templates/sdk-skeleton/swift/*.tera`); the
+> [github.com mirror](https://github.com/jedarden/pdftract-swift) is
+> read-only.
+>
+> **Do not hand-edit generated files.** Changes to `Sources/`, `Tests/`,
+> `Package.swift`, or this README are drift: the next codegen refresh
+> silently reverts them. Fix the templates in jedarden/pdftract, then
+> regenerate this drop.
+>
+> Bug reports and pull requests go to
+> [jedarden/pdftract](https://git.ardenone.com/jedarden/pdftract), not this
+> repo. The full refresh procedure — generator invocation, validation, and
+> the provenance stamp — is documented in
+> [docs/notes/codegen-refresh.md](docs/notes/codegen-refresh.md).
+
 ## Platform Support
 
 **Supported**: macOS 13+, Linux (server-side use only)
