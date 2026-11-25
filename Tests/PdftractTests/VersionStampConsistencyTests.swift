@@ -37,9 +37,12 @@
 //
 // What is deliberately NOT pinned here:
 //
-//   - The git tag this repo carries. codegen-refresh.md requires tag ==
-//     stamp, but a `git archive` extraction (and any clone without refs)
-//     cannot see tags; that equality stays a release-runbook step.
+//   - The git tag this repo carries. Under the versioning policy
+//     (codegen-refresh.md, "Package-versioning policy") the tag equals the
+//     stamp on the normal drop-cut release and runs one patch ahead of it
+//     on an SDK-only release — but a `git archive` extraction (and any
+//     clone without refs) cannot see tags, so that relation stays a
+//     release-runbook check rather than a gate here.
 //   - The README receipt example's `"extraction_version": "..."` value. That
 //     is example CLI output showing a pdftract extraction receipt, not an
 //     SDK stamp, and the CLI that produced it is the binary's concern.

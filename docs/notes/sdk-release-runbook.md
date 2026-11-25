@@ -91,12 +91,15 @@ curl -s -o /dev/null -w '%{http_code}\n' \
   'https://github.com/jedarden/pdftract-swift/info/refs?service=git-upload-pack'
 
 # 2. Latest tag visible there, with the peeled commit matching local
-VER="$(cat .codegen-version)"
+#    VER is the release version from checklist step 0 — equal to
+#    .codegen-version only on a drop-cut release, patch-ahead on an
+#    SDK-only one (versioning policy in codegen-refresh.md).
+VER="<X.Y.Z from checklist step 0>"
 git ls-remote --tags https://github.com/jedarden/pdftract-swift.git | grep "refs/tags/v${VER}"
 git rev-parse "v${VER}^{commit}"   # must equal the ^{} peeled SHA from the line above
 
 # 3. The documented requirement resolves against a visible tag
-grep -n 'from:' README.md          # README's from: must be <= the latest tag visible in step 2
+grep -n 'from:' README.md          # README's from: (the drop floor) must be <= the latest tag visible in step 2
 
 # 4. The full consumer path: resolve + build + import from the published tag
 scripts/spm-install-smoke.sh
@@ -114,15 +117,27 @@ README snippet whose API the tag doesn't ship); do not announce.
 
 ## The version triple
 
-Three independently-stored artifacts must name the same `X.Y.Z`. Two of them
-are generator output and are stamped *together* by one flag; the third is the
-tag you cut by hand:
+Three independently-stored artifacts carry version literals. On a
+**drop-cut release** — the normal case, and every release so far — they
+name the same `X.Y.Z`. On an **SDK-only release** (no new pdftract drop) the
+tag moves ahead by a patch and the generator-stamped two stay at the drop;
+the full rule is the versioning policy in `codegen-refresh.md`
+("Package-versioning policy"). Two of the artifacts are generator output
+and are stamped *together* by one flag; the tag is the one you cut by hand:
 
 | Artifact | Format | Set by | Read by |
 |---|---|---|---|
 | `.codegen-version` | plain `X.Y.Z` (no `v`) | `pdftract sdk codegen --version X.Y.Z` | humans; provenance only — nothing mechanical reads it |
 | `README.md` | `from: "X.Y.Z"` install snippet, "generated against pdftract X.Y.Z" line, release link | the same `--version` flag | consumers (SwiftPM `from:`), humans |
 | git tag `vX.Y.Z` | annotated, `v` prefix | you, at step 2 below | SwiftPM — this **is** the release |
+
+The relation between them is the policy: **tag ≥ `.codegen-version`, same
+major.minor** — equality means a drop-cut release; a patch-only lead means
+SDK-only releases shipped ahead of the drop. Only the tag moves on an
+SDK-only release, never the stamps (README is generated output; a
+hand-bumped `from:` is drift, and regenerating at a fake version would
+falsify the drop provenance). `from:` is a floor: consumers resolve upward,
+so an SDK-only tag publishes fine with README still advertising the drop.
 
 Notes on the triple:
 
@@ -144,6 +159,9 @@ Notes on the triple:
   `v0.1.0-test`, and the link stayed dead until pdftract's v1.2.0 landed
   (present on both Forgejo and its GitHub mirror as of 2026-11-25). Step 1
   of the checklist therefore includes checking upstream, not just this repo.
+  The link is drop-stamped, so on an SDK-only release it is exactly where
+  the last drop-cut left it — its upstream situation carries over, and
+  only a new drop can move it.
 
 ## What runs automatically vs. what you do by hand
 
@@ -208,13 +226,21 @@ matched its own claims.
   git status --short
   git log --oneline -3
   ```
-- The version you are releasing is `X.Y.Z` = `.codegen-version` = the README
-  `from:` value = the `--version` the drop was generated with. Check all
-  three:
+- Choose the version you are releasing, `X.Y.Z`, per the versioning policy
+  (codegen-refresh.md): the smallest unused semver that is ≥ the current
+  drop stamp and shares its major.minor. On a **drop-cut release** that is
+  `.codegen-version` itself — equal to the README `from:` value and the
+  `--version` the drop was generated with. On an **SDK-only release** it is
+  the newest existing tag's patch + 1, while the stamps stay at the drop.
+  Check all of it:
   ```bash
-  cat .codegen-version
-  grep -n 'from:' README.md
+  cat .codegen-version          # the drop stamp (stays put on an SDK-only release)
+  grep -n 'from:' README.md     # == .codegen-version — gate-enforced, always the drop
+  git ls-remote --tags origin | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -3
   ```
+  `X.Y.Z` must not collide with any of those tags; a major/minor divergence
+  from the stamp means this release may not happen without a drop (the
+  policy above).
 - Upstream pdftract has its own `vX.Y.Z` release (so the README release link
   resolves the day you announce):
   ```bash
@@ -272,14 +298,18 @@ On Forgejo — never push tags (or anything) to GitHub directly; the mirror is
 one-way, server-side:
 
 ```bash
-VER=1.3.0   # X.Y.Z, no 'v'; the tag gets the 'v'
-git tag -a "v${VER}" -m "Release v${VER} (generated against pdftract ${VER})" main
+VER=1.2.1                       # the release version chosen at step 0; no 'v'
+DROP="$(cat .codegen-version)"  # the drop stamp; == VER only on a drop-cut release
+git tag -a "v${VER}" -m "Release v${VER} (generated against pdftract ${DROP})" main
 git push origin "v${VER}"
 ```
 
 - **Annotated** (`-a`), matching both shipped releases. A lightweight tag
   works for SwiftPM but breaks the convention and the `^{}`-peeled line you
   verify in step 4.
+- The message names the **drop** the tree was generated from, not
+  necessarily `${VER}` — on an SDK-only release the tag's tree was not
+  generated against itself.
 - Tag `main` at the gated commit. If `main` moved since the green run,
   re-run step 1 on the new HEAD before tagging it.
 
@@ -352,7 +382,10 @@ that break Linux consumers — the `.linux(.v4)` class of failure
 *resolved*, not the one requested: `from:` floats up to the newest tag, so
 `from: "1.1.0"` still pins 1.2.0 — the printed `Package.resolved` is the
 evidence that matters. Run it after step 4, before announcing; record its
-exit and resolved version with the release evidence in step 6.
+exit and resolved version with the release evidence in step 6. On an
+SDK-only release, pass the release version explicitly
+(`spm-install-smoke.sh "${VER}"`) so the check exercises the new tag
+directly instead of reaching it only via float-up from the drop floor.
 
 ### 6. Record and announce
 
@@ -369,7 +402,9 @@ smoke check's exit and resolved version. The announcement can then cite
 and SwiftPM caches resolved versions. Ship a fix as a new version: correct
 the tree, gate it, cut `v(X.Y.Z+1)` (patch bump for release-metadata fixes;
 semver discipline for anything behavioral). This matches the org-wide
-never-force-push rule.
+never-force-push rule — and a release-metadata fix is precisely an
+SDK-only release under the versioning policy (codegen-refresh.md): the
+stamps stay at the drop, only the tag moves.
 
 ## Retiring a compatibility shim
 
@@ -423,3 +458,11 @@ Breaking is a property of what shipped, not of what the diff removes.
   and import all green, and `from: "1.1.0"` confirmed to float up to 1.2.0
   (floor semantics working; the pinned revision matched the mirror's
   `^{}`-peeled commit exactly).
+- **2026-11-25** — package-versioning policy added (pdfswift-88877757,
+  defined in codegen-refresh.md "Package-versioning policy"): SDK-only
+  releases move the tag one patch ahead of the drop and touch no stamp;
+  the triple above names one version only on a drop-cut release. The tag
+  message and the pre-announcement check now take the release version and
+  the drop stamp as separate values (they were conflated before, which
+  would have mislabeled an SDK-only tag and false-alarmed the mirror
+  check).

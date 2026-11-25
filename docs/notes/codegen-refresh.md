@@ -226,8 +226,11 @@ repo files relative to `#filePath`, needs no pdftract binary, and runs in
 the standard `swift test` gate on every push. What remains a discipline:
 
 - `.codegen-version` must always name the pdftract release the generated files
-  were actually emitted from, and the git tag this repo carries must be that
-  same version.
+  were actually emitted from. The git tag relates to it per the versioning
+  policy below — equal on the usual drop-cut release, patch-ahead on an
+  SDK-only one — and that relation is a release-runbook check
+  (`docs/notes/sdk-release-runbook.md`), not a gate: an archive extraction
+  cannot see tags.
 - The tag **is** written by hand today. The release cascade's Swift slot
   (`pdftract-release-cascade` → `sdk-swift-publish`, WorkflowTemplates in
   `declarative-config/k8s/iad-ci/argo-workflows/`) is **hard-off**
@@ -244,6 +247,78 @@ the standard `swift test` gate on every push. What remains a discipline:
   the release tags a tree whose generated content does not match the release
   it advertises, which is exactly the ADR-1 failure mode (a "release" that
   never matched its own claims) this discipline exists to prevent.
+
+## Package-versioning policy: the stamp names the drop, the tag names the release
+
+An SDK release does not always carry a new pdftract drop. SDK-side-only
+changes — a compatibility shim, a fix in hand-written code — need a
+consumer-visible SwiftPM release of their own, and the version the next
+codegen stamps (`--version`, i.e. the pdftract release) has no reason to
+move for them. The policy (pdfswift-88877757) separates the two identities
+a version literal could name:
+
+| Identity | Sites | Moves when | Enforced by |
+|---|---|---|---|
+| **Drop stamp** | `.codegen-version`, README `from:`, README "generated against", README release link | a codegen refresh only | `VersionStampConsistencyTests` — exact equality across all four, never `0.1.0` |
+| **Release tag** | the annotated `v`-prefixed git tag (`Package.swift` carries no literal — a SwiftPM package's version **is** its tag) | every release, cut by hand | runbook discipline: gates clone or extract trees, not refs, so no gate can see tags |
+
+`from:` is consumer-facing but drop-stamped: it is a *floor* — SwiftPM
+resolves upward to the newest tag — not a declaration of the newest
+release. That floor semantics is what lets the tag carry a release by
+itself.
+
+**The rule: a release tag is the smallest unused `X.Y.Z` that is ≥ the
+current drop stamp and shares its major.minor.**
+
+- **Drop-cut release (the normal case): tag == stamp.** The refresh lands,
+  goes green, and `vX.Y.Z` is cut with `.codegen-version == X.Y.Z`. Both
+  releases so far (`v1.1.0`, `v1.2.0`) were this kind.
+- **SDK-only release: tag = stamp with the patch incremented** — taken from
+  the newest existing tag, so it never collides. Drop 1.2.0 stays stamped
+  in all four sites; the fix ships as `v1.2.1`. The stamps are *not*
+  touched, and that is the point (see the rejected alternative below).
+- **Major/minor never diverge from the stamp.** They track the generated
+  lineage: generated code is most of the public API, and the one known
+  semver-major event — retiring a compatibility shim
+  (sdk-release-runbook.md) — coincides with the drop that ships the native
+  names anyway. A hand-written change big enough to want a minor or major
+  waits for, or ships together with, the next drop. The gate cannot
+  enforce this (tags are invisible to it); the runbook's checklist step 0
+  is the enforcement point, and overriding it consciously is a
+  release-notes event, not a silent one.
+- **Drop-collision rule.** If pdftract itself cuts a patch drop whose
+  version an SDK-only release already consumed (drop `1.2.1` after an
+  SDK-only `v1.2.1`), the drop-cut release takes the next free patch — tag
+  `v1.2.2` stamped `.codegen-version 1.2.1` — and says so in the release
+  notes. Never move a published tag.
+
+Why the stamps stay put on an SDK-only release — the alternative floated
+for pdfswift-88877757 (bump README's `from:` to the SDK-only version and
+relax the consistency gate to a major.minor-prefix comparison) was
+considered and rejected:
+
+1. **It requires hand-editing generated output.** README is template
+   output; a hand-bumped `from:` is drift by this repo's own contract,
+   reverted by the next refresh — and permanently red in the
+   `codegen-drift-gate` regenerate-and-diff, which regenerates README at
+   the drop stamp. Under this policy that diff needs no exception, ever.
+2. **Regenerating at a fake version is worse.** Stamping
+   `--version 1.2.1` without a pdftract `1.2.1` release would falsify the
+   "generated against pdftract 1.2.1" line — provenance, the one thing
+   `.codegen-version` exists to keep honest.
+3. **It buys nothing.** The floor semantics above already resolve an
+   SDK-only tag for every consumer (`from: "1.2.0"` reaches `v1.2.1`);
+   the smoke check in the runbook verified exactly this float-up behavior.
+4. **A prefix-relaxed gate is a weaker tripwire for no benefit.** Exact
+   equality catches a stale stamp at any single site; a prefix comparison
+   cannot, and it blurs the `0.1.0` rejection.
+
+Accepted consequences: inside an SDK-only tag, that tag's README still
+advertises `from: <drop>` — truthful about the drop, behind the newest
+tag; the release announcement carries the version, not the README. And
+the runbook's release/verification commands must take the *release*
+version and the *drop stamp* as separate values (equal only on a drop-cut
+release) — those amendments are in `docs/notes/sdk-release-runbook.md`.
 
 ## Validating a drop
 
