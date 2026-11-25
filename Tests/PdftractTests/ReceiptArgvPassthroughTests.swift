@@ -16,7 +16,7 @@
 // What is pinned:
 //
 //   1. Argv. `verifyReceipt("doc.pdf", receipt: Receipt(data: p))` spawns
-//      exactly ["verify-receipt", "doc.pdf", p, "--json"] — the receipt
+//      exactly ["verify-receipt", "--json", "--", "doc.pdf", p] — the receipt
 //      string is neither spilled to a temporary file (contrast Source.bytes,
 //      which always spills) nor re-encoded: an absolute path with a space and
 //      a relative path both arrive byte-for-byte. A regeneration that moved
@@ -101,8 +101,10 @@ final class ReceiptArgvPassthroughTests: XCTestCase {
 
     // MARK: Argv shape — the README's path contract
 
-    /// The receipt string reaches the child verbatim as the third argument —
-    /// the `RECEIPT.json` positional — after the PDF path and before `--json`.
+    /// The receipt string reaches the child verbatim as the `RECEIPT.json`
+    /// positional — after the `--` separator that shields both
+    /// caller-supplied paths from the flag parser (pdfswift-4e62b1ac), with
+    /// the PDF path first and `--json` moved ahead of the separator.
     /// Absolute-with-space and relative paths pin no-mangling and no-spill:
     /// unlike `Source.bytes`, nothing about a receipt is written to disk by
     /// the SDK, and `--inline`/stdin are not used.
@@ -116,8 +118,8 @@ final class ReceiptArgvPassthroughTests: XCTestCase {
 
             XCTAssertEqual(
                 try Self.capturedArguments(from: stub.capturePath),
-                ["verify-receipt", "doc.pdf", receiptPath, "--json"],
-                "receipt \(receiptPath) must reach the CLI verbatim as the RECEIPT.json positional"
+                ["verify-receipt", "--json", "--", "doc.pdf", receiptPath],
+                "receipt \(receiptPath) must reach the CLI verbatim as the RECEIPT.json positional, after the -- separator"
             )
         }
     }

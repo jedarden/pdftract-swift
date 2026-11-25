@@ -149,7 +149,7 @@ final class BinaryPathOverrideTests: XCTestCase {
         )
         XCTAssertEqual(
             try Self.capturedArguments(from: stub.capturePath),
-            ["extract", "--json", "document.pdf"],
+            ["extract", "--json", "--", "document.pdf"],
             "the capture file must hold the buffered-path argv — its existence proves the custom-path binary itself was spawned"
         )
     }
@@ -178,7 +178,7 @@ final class BinaryPathOverrideTests: XCTestCase {
         )
         XCTAssertEqual(
             try Self.capturedArguments(from: stub.capturePath),
-            ["extract", "--ndjson", "document.pdf"],
+            ["extract", "--ndjson", "--", "document.pdf"],
             "the capture file must hold the streaming-path argv — its existence proves the custom-path binary itself was spawned"
         )
     }
@@ -209,7 +209,7 @@ final class BinaryPathOverrideTests: XCTestCase {
         )
         XCTAssertEqual(
             try Self.capturedArguments(from: stub.capturePath),
-            ["grep", "needle", "document.pdf"],
+            ["grep", "--", "needle", "document.pdf"],
             "search() must send the documented grep argv to the custom-path binary"
         )
     }

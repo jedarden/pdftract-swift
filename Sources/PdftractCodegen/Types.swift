@@ -21,6 +21,11 @@ public enum Source: Sendable {
     /// Converts the source to CLI arguments, tracking any temporary files
     /// that had to be materialized on disk so they can be removed once the
     /// pdftract process no longer needs them.
+    ///
+    /// The returned arguments are caller-controlled values, so every consumer
+    /// appends them *after* the `--` end-of-options separator (see
+    /// "Flag-like paths and patterns" in README.md) — a path or URL that
+    /// begins with `-` must reach the CLI as a value, never as a flag.
     /// - Returns: The prepared arguments plus any temp files to clean up.
     func toArgs() throws -> PreparedArgs {
         switch self {

@@ -18,9 +18,10 @@
 //      UTF-8 and an embedded NUL pin exact-bytes copying, not just length),
 //      under a `pdftract-input-<UUID>.pdf` name in the temp directory, and
 //      the child receives that path as a positional argument — no inline
-//      data on the argv. It is the SOLE argument for the flagless consumers
-//      (extract, both streaming paths, search); extractText and
-//      extractMarkdown append only their format flag (+ --json) after it.
+//      data on the argv. It is the LAST element of the argv: every consumer
+//      places the caller-controlled spill after the `--` end-of-options
+//      separator (pdfswift-4e62b1ac), with extractText/extractMarkdown's
+//      format flags moved ahead of the separator rather than trailing it.
 //   2. Cleanup. The SDK deletes the spill itself when the call finishes —
 //      the README's "no manual cleanup is required" promise. Asserted on the
 //      success path (the buffered `defer` runs before `extract` returns), on
@@ -212,8 +213,8 @@ final class SourceBytesPassthroughTests: XCTestCase {
     // MARK: Buffered exec path — the README example
 
     /// The README "Extract from in-memory Data" example verbatim: the spill
-    /// is the sole positional argument after `extract --json`, holds the
-    /// caller's exact bytes, and is already gone when `extract` returns — the
+    /// is the sole argument after `extract --json --`, holds the caller's
+    /// exact bytes, and is already gone when `extract` returns — the
     /// "no manual cleanup is required" promise on the success path.
     func testExtractFromInMemoryDataSpillsExactBytesAndCleansUp() async throws {
         let stub = try Self.writeArgCapturingStub(stdout: Self.minimalDocumentJSON)
@@ -225,7 +226,10 @@ final class SourceBytesPassthroughTests: XCTestCase {
         let argv = try Self.capturedArguments(from: stub.capturePath)
         XCTAssertEqual(argv[0], "extract")
         XCTAssertEqual(argv[1], "--json")
-        let spill = try Self.assertSpillArgument(argv, sourceArgumentIndex: 2)
+        // The spill is caller-controlled input: it lands after the `--`
+        // end-of-options separator (pdfswift-4e62b1ac), never among flags.
+        XCTAssertEqual(argv[2], "--")
+        let spill = try Self.assertSpillArgument(argv, sourceArgumentIndex: 3)
 
         XCTAssertEqual(
             try Self.capturedInput(from: stub.inputCopyPath),
@@ -315,7 +319,7 @@ final class SourceBytesPassthroughTests: XCTestCase {
         )
 
         let argv = try Self.capturedArguments(from: stub.capturePath)
-        let spill = try Self.assertSpillArgument(argv, sourceArgumentIndex: 2)
+        let spill = try Self.assertSpillArgument(argv, sourceArgumentIndex: 3)
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: spill),
             "the spilled temp file survived a failing extract() — Source.bytes leaks on the error path"
@@ -324,9 +328,10 @@ final class SourceBytesPassthroughTests: XCTestCase {
 
     // MARK: The other ExtractOptions-shaped consumers
 
-    /// `extractText` and `extractMarkdown` interleave their format flags
-    /// *after* the source on the same buffered path; with `.bytes` the
-    /// interleaved element is the spill path, and each call cleans up its own
+    /// `extractText` and `extractMarkdown` carry their format flags *before*
+    /// the `--` separator on the same buffered path (pdfswift-4e62b1ac moved
+    /// them ahead of the caller-controlled source); with `.bytes` the
+    /// trailing element is the spill path, and each call cleans up its own
     /// spill.
     func testBytesSourceThroughExtractTextAndMarkdown() async throws {
         let stub = try Self.writeArgCapturingStub(stdout: Self.minimalDocumentJSON)
@@ -339,13 +344,12 @@ final class SourceBytesPassthroughTests: XCTestCase {
         XCTAssertEqual(textArgv[0], "extract")
         let textSpill = try Self.assertSpillArgument(
             textArgv,
-            sourceArgumentIndex: 1,
-            followedBy: ["--text", "--json"]
+            sourceArgumentIndex: 4
         )
         XCTAssertEqual(
-            Array(textArgv.dropFirst(2)),
-            ["--text", "--json"],
-            "extractText() sent \(textArgv) — format flags belong after the spilled source path"
+            Array(textArgv.dropFirst(1)),
+            ["--text", "--json", "--"],
+            "extractText() sent \(textArgv) — format flags belong before the -- separator, the spilled source path after it"
         )
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: textSpill),
@@ -357,13 +361,12 @@ final class SourceBytesPassthroughTests: XCTestCase {
         XCTAssertEqual(markdownArgv[0], "extract")
         let markdownSpill = try Self.assertSpillArgument(
             markdownArgv,
-            sourceArgumentIndex: 1,
-            followedBy: ["--md", "--json"]
+            sourceArgumentIndex: 4
         )
         XCTAssertEqual(
-            Array(markdownArgv.dropFirst(2)),
-            ["--md", "--json"],
-            "extractMarkdown() sent \(markdownArgv) — format flags belong after the spilled source path"
+            Array(markdownArgv.dropFirst(1)),
+            ["--md", "--json", "--"],
+            "extractMarkdown() sent \(markdownArgv) — format flags belong before the -- separator, the spilled source path after it"
         )
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: markdownSpill),
@@ -394,7 +397,8 @@ final class SourceBytesPassthroughTests: XCTestCase {
         let argv = try Self.capturedArguments(from: stub.capturePath)
         XCTAssertEqual(argv[0], "extract")
         XCTAssertEqual(argv[1], "--ndjson")
-        let spill = try Self.assertSpillArgument(argv, sourceArgumentIndex: 2)
+        XCTAssertEqual(argv[2], "--")
+        let spill = try Self.assertSpillArgument(argv, sourceArgumentIndex: 3)
         XCTAssertTrue(
             Self.waitUntilRemoved(spill),
             "the spilled temp file survived extractStream() — Source.bytes leaks on the streaming path"
@@ -418,8 +422,9 @@ final class SourceBytesPassthroughTests: XCTestCase {
 
         let argv = try Self.capturedArguments(from: stub.capturePath)
         XCTAssertEqual(argv[0], "grep")
-        XCTAssertEqual(argv[1], "invoice", "search() must pass the pattern before the source")
-        let spill = try Self.assertSpillArgument(argv, sourceArgumentIndex: 2)
+        XCTAssertEqual(argv[1], "--", "search() must separate grep's flags from the caller's values with --")
+        XCTAssertEqual(argv[2], "invoice", "search() must pass the pattern after the separator, before the source")
+        let spill = try Self.assertSpillArgument(argv, sourceArgumentIndex: 3)
         XCTAssertTrue(
             Self.waitUntilRemoved(spill),
             "the spilled temp file survived search() — Source.bytes leaks on the streaming path"

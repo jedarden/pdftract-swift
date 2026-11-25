@@ -237,8 +237,11 @@ public struct Pdftract: Sendable {
         var args = ["extract", "--json"]
         let prepared = try source.toArgs()
         defer { prepared.cleanUp() }
-        args.append(contentsOf: prepared.arguments)
+        // Options before the `--` separator, the caller's source after it —
+        // see "Flag-like paths and patterns" in README.md.
         args.append(contentsOf: options.toArgs())
+        args.append("--")
+        args.append(contentsOf: prepared.arguments)
 
         let output = try await exec(args, timeout: timeout)
 
@@ -273,12 +276,15 @@ public struct Pdftract: Sendable {
         var args = ["extract"]
         let prepared = try source.toArgs()
         defer { prepared.cleanUp() }
-        args.append(contentsOf: prepared.arguments)
+        // Options and format flags before the `--` separator, the caller's
+        // source after it — see "Flag-like paths and patterns" in README.md.
         args.append(contentsOf: options.toArgs())
         
         args.append("--text")
         
         args.append("--json")
+        args.append("--")
+        args.append(contentsOf: prepared.arguments)
 
         let output = try await exec(args, timeout: timeout)
 
@@ -318,12 +324,15 @@ public struct Pdftract: Sendable {
         var args = ["extract"]
         let prepared = try source.toArgs()
         defer { prepared.cleanUp() }
-        args.append(contentsOf: prepared.arguments)
+        // Options and format flags before the `--` separator, the caller's
+        // source after it — see "Flag-like paths and patterns" in README.md.
         args.append(contentsOf: options.toArgs())
         
         args.append("--md")
         
         args.append("--json")
+        args.append("--")
+        args.append(contentsOf: prepared.arguments)
 
         let output = try await exec(args, timeout: timeout)
 
@@ -362,8 +371,14 @@ public struct Pdftract: Sendable {
                 let prepared: PreparedArgs
                 do {
                     prepared = try source.toArgs()
-                    args.append(contentsOf: prepared.arguments)
+                    // Options before the `--` separator, the caller's source
+                    // after it — see "Flag-like paths and patterns" in
+                    // README.md. Every method builds its argv in this order;
+                    // a value that begins with `-` must never be reachable
+                    // by the flag parser.
                     args.append(contentsOf: options.toArgs())
+                    args.append("--")
+                    args.append(contentsOf: prepared.arguments)
                 } catch {
                     continuation.finish(throwing: error)
                     return
@@ -520,12 +535,20 @@ public struct Pdftract: Sendable {
     ) -> AsyncThrowingStream<Match, Error> {
         return AsyncThrowingStream { continuation in
             Task {
-                var args = ["grep", pattern]
+                var args = ["grep"]
                 let prepared: PreparedArgs
                 do {
                     prepared = try source.toArgs()
-                    args.append(contentsOf: prepared.arguments)
+                    // Options first, then `--`, then the caller's values —
+                    // see "Flag-like paths and patterns" in README.md.
+                    // Without the separator a pattern like "-js" is parsed
+                    // as short flags (here: --threads with value "s"), and
+                    // a pattern like "-i" would silently flip
+                    // case-sensitivity instead of being searched for.
                     args.append(contentsOf: options.toArgs())
+                    args.append("--")
+                    args.append(pattern)
+                    args.append(contentsOf: prepared.arguments)
                 } catch {
                     continuation.finish(throwing: error)
                     return
@@ -690,10 +713,13 @@ public struct Pdftract: Sendable {
         ]
         let prepared = try source.toArgs()
         defer { prepared.cleanUp() }
-        args.append(contentsOf: prepared.arguments)
+        // Options before the `--` separator, the caller's source after it —
+        // see "Flag-like paths and patterns" in README.md.
         
         args.append(contentsOf: options.toArgs())
         
+        args.append("--")
+        args.append(contentsOf: prepared.arguments)
 
         let output = try await exec(args, timeout: timeout)
 
@@ -736,10 +762,13 @@ public struct Pdftract: Sendable {
         ]
         let prepared = try source.toArgs()
         defer { prepared.cleanUp() }
-        args.append(contentsOf: prepared.arguments)
+        // Options before the `--` separator, the caller's source after it —
+        // see "Flag-like paths and patterns" in README.md.
         
         args.append(contentsOf: options.toArgs())
         
+        args.append("--")
+        args.append(contentsOf: prepared.arguments)
 
         let output = try await exec(args, timeout: timeout)
 
@@ -779,8 +808,11 @@ public struct Pdftract: Sendable {
         ]
         let prepared = try source.toArgs()
         defer { prepared.cleanUp() }
-        args.append(contentsOf: prepared.arguments)
+        // Options before the `--` separator, the caller's source after it —
+        // see "Flag-like paths and patterns" in README.md.
         
+        args.append("--")
+        args.append(contentsOf: prepared.arguments)
 
         let output = try await exec(args, timeout: timeout)
 
@@ -829,7 +861,9 @@ public struct Pdftract: Sendable {
     ///   `TimeoutError` on deadline expiry, `CancellationError` if the Task
     ///   is cancelled.
     public func verifyReceipt(_ path: String, receipt: Receipt, timeout: TimeInterval? = nil) async throws -> ReceiptVerificationResult {
-        let output = try await exec(["verify-receipt", path, receipt.data, "--json"], timeout: timeout)
+        // `--` separates the SDK's `--json` flag from the two caller-supplied
+        // positional paths — see "Flag-like paths and patterns" in README.md.
+        let output = try await exec(["verify-receipt", "--json", "--", path, receipt.data], timeout: timeout)
 
         guard let data = output.data(using: .utf8) else {
             throw PdftractError("Failed to decode output", -1)

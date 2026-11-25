@@ -131,7 +131,9 @@ final class ExtractOptionsOcrPassthroughTests: XCTestCase {
 
     /// The README "Extract with OCR" example verbatim (`ocrLanguage: "eng"`,
     /// `ocrThreshold: 0.7`) must reach the child as both flags, spelled as
-    /// documented, each adjacent to its value, after the source path.
+    /// documented, each adjacent to its value — before the `--` separator
+    /// that shields the caller-controlled source path from the flag parser
+    /// (pdfswift-4e62b1ac).
     func testExtractSerializesBothOcrFlagsFromReadmeExample() async throws {
         let argv = try await capturedBufferedArgv(stdout: Self.minimalDocumentJSON) { client in
             _ = try await client.extract(
@@ -142,8 +144,8 @@ final class ExtractOptionsOcrPassthroughTests: XCTestCase {
 
         XCTAssertEqual(
             argv,
-            ["extract", "--json", "document.pdf", "--ocr-language", "eng", "--ocr-threshold", "0.7"],
-            "extract() with the README OCR options sent \(argv) — expected --ocr-language and --ocr-threshold with their values after the source path"
+            ["extract", "--json", "--ocr-language", "eng", "--ocr-threshold", "0.7", "--", "document.pdf"],
+            "extract() with the README OCR options sent \(argv) — expected --ocr-language and --ocr-threshold with their values before the -- separator, the source path after it"
         )
     }
 
@@ -159,7 +161,7 @@ final class ExtractOptionsOcrPassthroughTests: XCTestCase {
 
         XCTAssertEqual(
             argv,
-            ["extract", "--json", "document.pdf"],
+            ["extract", "--json", "--", "document.pdf"],
             "default ExtractOptions must omit both OCR flags; extract() sent \(argv)"
         )
         XCTAssertFalse(argv.contains("--ocr-language"), "default options leaked --ocr-language")
@@ -179,7 +181,7 @@ final class ExtractOptionsOcrPassthroughTests: XCTestCase {
 
         XCTAssertEqual(
             argv,
-            ["extract", "--json", "document.pdf", "--ocr-language", "deu"],
+            ["extract", "--json", "--ocr-language", "deu", "--", "document.pdf"],
             "ocrLanguage-only options sent \(argv) — expected only --ocr-language with its value"
         )
     }
@@ -197,7 +199,7 @@ final class ExtractOptionsOcrPassthroughTests: XCTestCase {
 
         XCTAssertEqual(
             argv,
-            ["extract", "--json", "document.pdf", "--ocr-threshold", "0.75"],
+            ["extract", "--json", "--ocr-threshold", "0.75", "--", "document.pdf"],
             "ocrThreshold-only options sent \(argv) — expected only --ocr-threshold with the caller's value"
         )
     }
@@ -207,7 +209,8 @@ final class ExtractOptionsOcrPassthroughTests: XCTestCase {
     /// `extractText` and `extractMarkdown` interleave their own format flags
     /// (`--text` / `--md --json`) *after* the options on the same buffered
     /// exec path — the serialization is per-method, so each is pinned: OCR
-    /// flags between the source path and the format flags.
+    /// flags and format flags all before the `--` separator, the source path
+    /// after it.
     func testExtractTextAndMarkdownCarryOcrFlags() async throws {
         let textArgv = try await capturedBufferedArgv(stdout: Self.minimalDocumentJSON) { client in
             _ = try await client.extractText(
@@ -217,8 +220,8 @@ final class ExtractOptionsOcrPassthroughTests: XCTestCase {
         }
         XCTAssertEqual(
             textArgv,
-            ["extract", "document.pdf", "--ocr-language", "eng", "--ocr-threshold", "0.7", "--text", "--json"],
-            "extractText() sent \(textArgv) — OCR flags belong between the source path and the format flags"
+            ["extract", "--ocr-language", "eng", "--ocr-threshold", "0.7", "--text", "--json", "--", "document.pdf"],
+            "extractText() sent \(textArgv) — OCR flags and format flags belong before the -- separator, the source path after it"
         )
 
         let markdownArgv = try await capturedBufferedArgv(stdout: Self.minimalDocumentJSON) { client in
@@ -229,8 +232,8 @@ final class ExtractOptionsOcrPassthroughTests: XCTestCase {
         }
         XCTAssertEqual(
             markdownArgv,
-            ["extract", "document.pdf", "--ocr-language", "eng", "--ocr-threshold", "0.7", "--md", "--json"],
-            "extractMarkdown() sent \(markdownArgv) — OCR flags belong between the source path and the format flags"
+            ["extract", "--ocr-language", "eng", "--ocr-threshold", "0.7", "--md", "--json", "--", "document.pdf"],
+            "extractMarkdown() sent \(markdownArgv) — OCR flags and format flags belong before the -- separator, the source path after it"
         )
     }
 
@@ -264,8 +267,8 @@ final class ExtractOptionsOcrPassthroughTests: XCTestCase {
         let argv = try Self.capturedArguments(from: stub.capturePath)
         XCTAssertEqual(
             argv,
-            ["extract", "--ndjson", "document.pdf", "--ocr-language", "eng", "--ocr-threshold", "0.7"],
-            "extractStream() sent \(argv) — the streaming path must carry the OCR flags the buffered path carries"
+            ["extract", "--ndjson", "--ocr-language", "eng", "--ocr-threshold", "0.7", "--", "document.pdf"],
+            "extractStream() sent \(argv) — the streaming path must carry the OCR flags the buffered path carries, before the -- separator"
         )
     }
 }
