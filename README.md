@@ -110,6 +110,10 @@ print("Pages: \(doc.pages.count)")
 print("Title: \(doc.metadata.title ?? "Untitled")")
 ```
 
+The complete field set every decoded result carries — `Document`,
+`Metadata`, `Page`, `Span`, `Block`, and the rest — is documented in
+[Result types](#result-types) below.
+
 ### Extract from URL
 
 ```swift
@@ -344,6 +348,135 @@ The CLI's structured failure report (its `verify-receipt --json` output on
 stdout) is discarded when the SDK maps a non-zero exit, so the thrown error
 carries the CLI's stderr — empty on the mismatch exits. Call the CLI directly
 when you need the per-check detail.
+
+## Result types
+
+Every decoded result is a plain `Codable` and `Sendable` struct. The tables
+below are each type's complete field set; where the Swift property name
+differs from the JSON key it decodes, the key is given in parentheses. The
+decoder ignores JSON keys a type does not declare, so extra fields in the
+CLI's output are dropped, never surfaced.
+
+### Document
+
+Returned by `extract` — one `Page` per document page, in document order,
+plus the document's `metadata`.
+
+| Field | Type | Description |
+|---|---|---|
+| `schemaVersion` (`schema_version`) | `String` | Version of the extraction output schema (currently `"1.0"`) |
+| `pages` | `[Page]` | One entry per page, in document order |
+| `metadata` | `Metadata` | Document metadata — see the table below |
+
+The CLI's full JSON envelope carries more top-level keys than `Document`
+declares (`extraction_quality`, `outline`, `errors`, `links`, `form_fields`,
+`signatures`, `threads`, `attachments`). None are typed by this SDK, so the
+decoder drops them: those sections are not reachable through `extract`'s
+return value.
+
+### Metadata
+
+Returned by `getMetadata`, and embedded in every `Document` and `Fingerprint`.
+The fields map to the PDF information dictionary; a field is `nil` when the
+PDF omits the corresponding entry.
+
+| Field | Type | Description |
+|---|---|---|
+| `title` | `String?` | `/Title` — document title |
+| `author` | `String?` | `/Author` — who created the document |
+| `subject` | `String?` | `/Subject` — subject-matter summary |
+| `keywords` | `[String]?` | The `/Keywords` entry |
+| `creator` | `String?` | Authoring application (e.g. "Microsoft Word 2019") |
+| `producer` | `String?` | PDF-writing library (e.g. "Acrobat Distiller") |
+| `created` | `String?` | Creation date, as an ISO-8601 string |
+| `modified` | `String?` | Last-modification date, as an ISO-8601 string |
+| `pageCount` (`page_count`) | `Int` | Total number of pages |
+
+### Page
+
+| Field | Type | Description |
+|---|---|---|
+| `pageIndex` (`page_index`) | `Int` | **Zero-based** page index — the document's first page is `0` (see [Stream extraction](#stream-extraction-for-large-pdfs)) |
+| `width` | `Double` | Page width in points (1/72 inch) |
+| `height` | `Double` | Page height in points (1/72 inch) |
+| `rotation` | `Int` | Page rotation in degrees clockwise: `0`, `90`, `180`, or `270` |
+| `spans` | `[Span]` | Text spans — atomic runs of text with consistent font and styling |
+| `blocks` | `[Block]` | Semantic blocks — paragraphs, headings, lists, tables, figures |
+
+The CLI's page JSON also carries `page_number`, `page_label`, `type`,
+`tables`, and `annotations`; none are declared here, so the decoder drops
+them.
+
+### Span
+
+| Field | Type | Description |
+|---|---|---|
+| `text` | `String` | The extracted text |
+| `bbox` | `[Double]` | Bounding box `[x0, y0, x1, y1]` in PDF user-space points — `(x0, y0)` is the bottom-left corner and `(x1, y1)` the top-right |
+| `font` | `String` | Font name or identifier |
+| `size` | `Double` | Font size in points |
+| `confidence` | `Double?` | Extraction confidence 0.0–1.0; present when the text came from OCR or the extraction was otherwise uncertain, `nil` when confidence does not apply |
+
+### Block
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `String` | Block type — commonly `paragraph`, `heading`, `list`, `table`, or `figure`. A plain string, not a Swift enum, so a kind this list does not name passes through unchanged |
+| `text` | `String` | The block's text — the concatenation of the text of its spans |
+| `bbox` | `[Double]` | Same `[x0, y0, x1, y1]` convention as `Span` |
+| `level` | `Int?` | Heading level (1–6) for `heading` blocks, nesting depth for `list` blocks; `nil` for other kinds |
+
+### Match
+
+Returned by `search` — see [Search](#search) for usage.
+
+| Field | Type | Description |
+|---|---|---|
+| `text` | `String` | The matched text |
+| `page` | `Int` | **Zero-based** page index of the page containing the match |
+| `bbox` | `[Double]` | Location of the match — same `[x0, y0, x1, y1]` convention as `Span` |
+| `context` | `Context` | Nested `Match.Context` with `before` and `after`: the text immediately surrounding the match |
+
+### Fingerprint
+
+Returned by `hash`.
+
+| Field | Type | Description |
+|---|---|---|
+| `hash` | `String` | SHA-256 hex digest of the document content |
+| `pageCount` (`page_count`) | `Int` | Total number of pages |
+| `fastHash` (`fast_hash`) | `String` | BLAKE3 hex digest of the first 10 KB — cheap to compare for a quick inequality check |
+| `metadata` | `Metadata` | Document metadata — same type as above |
+
+### Classification
+
+Returned by `classify`; `category` and `confidence` semantics (the
+ten-category vocabulary and the 0.0–1.0 range) are covered in
+[Classify document](#classify-document).
+
+| Field | Type | Description |
+|---|---|---|
+| `category` | `String` | One of the ten fixed document-type strings |
+| `confidence` | `Double` | Match score of the winning profile, 0.0–1.0 |
+| `tags` | `[String]` | Tags accompanying the classification |
+| `heuristics` | `[String: Bool]` | Individual feature detections: heuristic name → whether it matched |
+
+### ReceiptVerificationResult
+
+Returned by `verifyReceipt`; the verification flow and the thrown-error
+mapping are covered in [Verify receipt](#verify-receipt).
+
+| Field | Type | Description |
+|---|---|---|
+| `status` | `String` | Raw verification status from the CLI: `ok`, `fingerprint_mismatch`, `bbox_mismatch`, or `content_mismatch` |
+| `valid` | `Bool` | Computed property: `status == "ok"` |
+| `bestIou` (`best_iou`) | `Double` | Best span intersection-over-union observed during verification |
+| `expectedContentHash` (`expected_content_hash`) | `String?` | Content hash the receipt expected |
+| `actualContentHash` (`actual_content_hash`) | `String?` | Content hash the verification recomputed |
+| `reason` (decodes the CLI's `error` key) | `String?` | The CLI's explanation of which check failed; absent on success |
+
+`Receipt` itself carries a single field, `data: String` — the path of the
+receipt JSON file handed to the CLI (see [Verify receipt](#verify-receipt)).
 
 ## Binary version compatibility
 
