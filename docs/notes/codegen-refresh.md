@@ -93,7 +93,14 @@ docker run --rm -v "$PWD:/workspace" -w /workspace swift:5.10-jammy \
 **Always pass `--version` explicitly.** The flag defaults to pdftract's own
 Cargo version (`0.1.0`), which would stamp a wrong `.codegen-version`, a wrong
 `Package.swift`-style install snippet in `README.md`
-(`from: "0.1.0"`), and a wrong release link.
+(`from: "0.1.0"`), and a wrong release link. Since pdfswift-b2b1cd42 that
+exact failure has a mechanical tripwire:
+`Tests/PdftractTests/VersionStampConsistencyTests.swift` rejects a `0.1.0`
+stamp outright, so the omission fails the standard `swift test` gate on the
+next push instead of surviving as prose-only discipline. The tripwire cannot
+catch a *consistently wrong* version — regenerating with the same wrong
+`--version` stamps all sites alike, and the CI regenerate-and-diff has the
+same blind spot — so choosing the right value remains a human step.
 
 ## `.codegen-version` moves in lockstep with the binary release
 
@@ -101,7 +108,18 @@ Cargo version (`0.1.0`), which would stamp a wrong `.codegen-version`, a wrong
 which generator drop produced the checked-in tree. It is **pure provenance**:
 no runtime code reads it, and `sdk validate` does not compare it either
 (a deliberately mismatched file produces no finding — verified 2026-09-23).
-Nothing enforces lockstep mechanically, so it is a discipline:
+Stamp-site lockstep is now enforced mechanically (pdfswift-b2b1cd42):
+`Tests/PdftractTests/VersionStampConsistencyTests.swift` asserts one version
+literal across `.codegen-version`, the README's SwiftPM `from:` requirement,
+the README's "generated against pdftract" line, and the README's release
+link, treats a disappeared stamp site as a failure (absence must not read as
+agreement), rejects `0.1.0` outright (the omitted-`--version` default), and
+pins `Package.swift` as carrying no version literal at all — a SwiftPM
+package's version comes from its git tag, so the manifest has nothing to
+cross-check unless a future template starts stamping one, at which point the
+tripwire forces it into the consistency set consciously. The suite reads
+repo files relative to `#filePath`, needs no pdftract binary, and runs in
+the standard `swift test` gate on every push. What remains a discipline:
 
 - `.codegen-version` must always name the pdftract release the generated files
   were actually emitted from, and the git tag this repo carries must be that
