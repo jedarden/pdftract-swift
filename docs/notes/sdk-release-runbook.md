@@ -97,6 +97,9 @@ git rev-parse "v${VER}^{commit}"   # must equal the ^{} peeled SHA from the line
 
 # 3. The documented requirement resolves against a visible tag
 grep -n 'from:' README.md          # README's from: must be <= the latest tag visible in step 2
+
+# 4. The full consumer path: resolve + build + import from the published tag
+scripts/spm-install-smoke.sh
 ```
 
 Failures and what they mean: step 1 ≠ 200 → mirror visibility changed,
@@ -105,7 +108,9 @@ mirror; re-run step 3 of the checklist. Step 2 peeled SHA ≠ local → the
 mirror holds the tag on a stale commit; investigate before announcing.
 Step 3 `from:` greater than the latest visible tag → the README advertises a
 version no consumer can resolve; the drop or the tag didn't publish — do not
-announce.
+announce. Step 4 fails → the tag resolves but does not build or import as a
+dependency (broken manifest-as-dependency, Linux platform break, or a
+README snippet whose API the tag doesn't ship); do not announce.
 
 ## The version triple
 
@@ -117,7 +122,7 @@ tag you cut by hand:
 |---|---|---|---|
 | `.codegen-version` | plain `X.Y.Z` (no `v`) | `pdftract sdk codegen --version X.Y.Z` | humans; provenance only — nothing mechanical reads it |
 | `README.md` | `from: "X.Y.Z"` install snippet, "generated against pdftract X.Y.Z" line, release link | the same `--version` flag | consumers (SwiftPM `from:`), humans |
-| git tag `vX.Y.Z` | annotated, `v` prefix | you, at step 5 below | SwiftPM — this **is** the release |
+| git tag `vX.Y.Z` | annotated, `v` prefix | you, at step 2 below | SwiftPM — this **is** the release |
 
 Notes on the triple:
 
@@ -184,8 +189,10 @@ only release path. It has been used successfully twice.
 
 ## Checklist
 
-Ordered. Steps 1–4 are the gate; do not tag until all four pass. The
-ordering rule underneath everything: **a tag push triggers nothing** (the
+Ordered. Steps 0–1 are the gate — do not tag until both pass. Steps 3–5
+can only run once the tag is published (they prove the published thing,
+not the local tree); step 6 records and announces. The ordering rule
+underneath everything: **a tag push triggers nothing** (the
 sensor filters `refs/heads/main`, and a tag-only push doesn't even trigger
 the mirror sync — see gotcha below), so nobody will catch a tag cut on an
 ungreen commit except you, before you cut it. Tagging an ungreen or
@@ -320,12 +327,40 @@ Expect **two lines** (annotated tag):
   30 s and re-run before debugging; if still missing, re-run step 3 and
   check the sync response body.
 
-### 5. Record and announce
+### 5. Consumer smoke check: install the published tag as a consumer would
 
-Only after step 4 shows both lines. Record on the release bead: version,
+Steps 1–4 prove this repo's *view* of the release; nothing yet has built
+the tag *as a dependency*. That gap is what this step closes
+(pdfswift-41fd9985, added 2026-11-25): a fresh scratch package — outside
+this checkout, in a container, with no git credentials — resolves the
+README's exact `from:` requirement anonymously, builds the `Pdftract`
+product, and imports it from an executable mirroring the README's
+"Basic extract" snippet:
+
+```bash
+scripts/spm-install-smoke.sh            # pins whatever README.md currently publishes
+scripts/spm-install-smoke.sh 1.2.0      # or pin an explicit version/floor
+```
+
+Needs docker + the `swift:5.10-jammy` image and network access to
+github.com. It is the consumer-side complement to the `pdftract-swift-build`
+gate, which clones main HEAD and never builds a tag. It catches releases
+whose tag does not build as a dependency, a README `from:` above the newest
+published tag (every consumer broken on day one), and platform declarations
+that break Linux consumers — the `.linux(.v4)` class of failure
+(pdfswift-d9676b80). Note the summary line reports the version
+*resolved*, not the one requested: `from:` floats up to the newest tag, so
+`from: "1.1.0"` still pins 1.2.0 — the printed `Package.resolved` is the
+evidence that matters. Run it after step 4, before announcing; record its
+exit and resolved version with the release evidence in step 6.
+
+### 6. Record and announce
+
+Only after step 5 passes. Record on the release bead: version,
 tagged commit SHA, the gating build (workflow name + phase, or the local
-docker exit), the mirror-sync HTTP code, and the `ls-remote` output. The
-announcement can then cite `from: "X.Y.Z"` knowing it resolves.
+docker exit), the mirror-sync HTTP code, the `ls-remote` output, and the
+smoke check's exit and resolved version. The announcement can then cite
+`from: "X.Y.Z"` knowing it resolves.
 
 ## If the tag is wrong
 
@@ -381,3 +416,10 @@ Breaking is a property of what shipped, not of what the diff removes.
   anonymous reads and so cannot serve SwiftPM consumers. See "Canonical
   consumer URL (decision)" — flip conditions and the post-migration check
   live there.
+- **2026-11-25** — consumer smoke check added as checklist step 5
+  (pdfswift-41fd9985): `scripts/spm-install-smoke.sh`, closing the
+  nothing-ever-built-the-tag-as-a-dependency gap. First exercised against
+  the published v1.2.0 tag in swift:5.10-jammy — anonymous resolve, build,
+  and import all green, and `from: "1.1.0"` confirmed to float up to 1.2.0
+  (floor semantics working; the pinned revision matched the mirror's
+  `^{}`-peeled commit exactly).
