@@ -205,6 +205,15 @@ The SDK will search for `pdftract` on your PATH. To specify a custom binary path
 let client = Pdftract(binaryPath: "/custom/path/to/pdftract")
 ```
 
+A custom path is used verbatim — setting it skips the PATH search entirely. If
+the path does not exist or is not executable, no child can spawn and there is no
+CLI exit code to map: the buffered methods (`extract`, `extractText`,
+`extractMarkdown`, `getMetadata`, `hash`, `classify`, `verifyReceipt`) throw the
+base `PdftractError` with exit code `-1` and a `Failed to execute pdftract: …`
+message carrying the underlying spawn error. The streaming methods
+(`extractStream`, `search`) finish their iteration by throwing that spawn error
+unwrapped, with nothing yielded.
+
 ## Error handling
 
 All methods are `async throws` and can throw the following errors:
