@@ -101,18 +101,22 @@ Nothing enforces lockstep mechanically, so it is a discipline:
 - `.codegen-version` must always name the pdftract release the generated files
   were actually emitted from, and the git tag this repo carries must be that
   same version.
-- The tag is not written by hand: when pdftract releases version `N`, the
-  release cascade (`pdftract-release-cascade` → `pdftract-swift-publish`, both
-  WorkflowTemplates in `declarative-config/k8s/iad-ci/argo-workflows/`) clones
-  this repo, runs the conformance suite against the release-`N` binary, and
-  tags this repo `N` (numeric, no `v` prefix — SwiftPM resolves the README's
-  `.package(from:)` requirement against git tags).
-- Consequence: the refresh that picks up release `N`'s output — with
-  `--version N` and `.codegen-version` bumped to `N` — must be committed and
-  through the build gate **before** the cascade runs for `N`. Otherwise the
-  cascade tags a tree whose generated content does not match the release it
-  advertises, which is exactly the ADR-1 failure mode (a "release" that never
-  matched its own claims) this workflow exists to prevent.
+- The tag **is** written by hand today. The release cascade's Swift slot
+  (`pdftract-release-cascade` → `sdk-swift-publish`, WorkflowTemplates in
+  `declarative-config/k8s/iad-ci/argo-workflows/`) is **hard-off**
+  (`when: 'false'`) pending a template reconciliation, so both shipped tags
+  (`v1.1.0`, `v1.2.0` — annotated, `v`-prefixed; SwiftPM strips the `v` when
+  matching the README's `.package(from:)` requirement) were cut manually and
+  mirror-verified. The repeatable procedure is
+  `docs/notes/sdk-release-runbook.md`, which also lists the four defects a
+  re-enable must fix first (template-name mismatch, GitHub-direct push,
+  numeric-tag divergence, vacuous conformance gate).
+- Consequence of that manual path: the refresh that picks up release `N`'s
+  output — with `--version N` and `.codegen-version` bumped to `N` — must be
+  committed and through the build gate **before** `vN` is tagged. Otherwise
+  the release tags a tree whose generated content does not match the release
+  it advertises, which is exactly the ADR-1 failure mode (a "release" that
+  never matched its own claims) this discipline exists to prevent.
 
 ## Validating a drop
 
@@ -193,7 +197,7 @@ history:
 | When | Workflow (iad-ci) | What it does |
 |---|---|---|
 | Every push to `main` | `pdftract-swift-build` | `swift build` + `swift build --build-tests` on `swift:5.10-jammy`, then `swift test --filter 'StreamingStderrRegressionTests\|ExitCodeMappingTests'` (the two fake-binary suites). A regenerated drop that breaks either target, or regresses stderr draining or exit-code mapping, fails here. The filter predates the pdfswift-8f868708 XCTSkip guards, which removed the conformance-suite reason for it: binary-less, `ExtractStreamConformanceTests` now skips cleanly and could be safely added to the gate. A wholesale drop is still blocked, but for a different pre-existing reason: `ProcessLifecycleTests` fails 3/6 in docker-class containers (observed identically on the pre-guard tree, 2026-11-25 — cancel/timeout/drop-before-iteration; cancellation and timeouts don't reach the spawned child in that environment), and adding it would turn this gate red. Investigating that is its own piece of work; loosening the filter is a declarative-config change to `pdftract-swift-build-workflowtemplate.yml`. |
-| pdftract release `N` | `pdftract-swift-publish` (via `pdftract-release-cascade`) | Clones this repo, runs `swift test --filter ConformanceTests` against the release-`N` binary (must pass), tags `N`, warms Swift Package Index. Idempotent — skips an existing tag. |
+| pdftract release `N` | `pdftract-swift-publish` (via `pdftract-release-cascade`) | **Not firing** — the cascade's `sdk-swift-publish` slot is hard-off (`when: 'false'`), so pdftract releases do **not** auto-tag this SDK; releases are cut manually per `docs/notes/sdk-release-runbook.md`. The template, if ever enabled as written, clones GitHub directly and tags `N` numerically — four defects to reconcile first, listed in the runbook. |
 
 Both templates live in `jedarden/declarative-config` under
 `k8s/iad-ci/argo-workflows/` (`pdftract-swift-build-workflowtemplate.yml`,
