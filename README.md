@@ -269,9 +269,54 @@ print("Author: \(metadata.author ?? "Unknown")")
 
 ```swift
 let fingerprint = try await client.hash(.path("document.pdf"))
-print("SHA-256: \(fingerprint.hash)")
-print("BLAKE3: \(fingerprint.fastHash)")
+print("Fingerprint: \(fingerprint.hash)")
 ```
+
+`fingerprint.hash` is the binary's **structural fingerprint** — the literal
+prefix `pdftract-v1:` followed by 64 lowercase hex characters — not a bare
+digest, and not a hash of the file's bytes or of the extracted text. It is a
+Merkle-style SHA-256 over a canonicalized picture of the document's
+structure, mixed in a fixed order: the page count (big-endian `u32`); per
+page, the SHA-256 of the page's decoded content streams (comments dropped,
+whitespace normalized between tokens), the SHA-256 of its resolved resource
+dictionary (keys sorted), and its geometry — `MediaBox`, `CropBox`, rotation,
+each coordinate rounded to four decimal places; then the SHA-256 of the
+structure tree (all-zero for untagged PDFs); then one catalog flag byte
+(encrypted / JavaScript / XFA / optional-content groups). Deliberately
+excluded: producer, creator, author, title, dates, the `/ID` array, XMP
+metadata, xref byte layout, and object numbering.
+
+That shape gives the fingerprint three properties worth knowing:
+
+- **Stable across re-saves.** The excluded fields are exactly the ones that
+  churn when a file is re-saved, re-written, or linearized by a different
+  producer — the fingerprint comes out identical. It is a "same document
+  structure" key, not a byte-identity key: never use it to deduplicate files
+  at the byte level (two byte-different files can carry the same
+  fingerprint, and a metadata-only edit changes the file's own SHA-256
+  without touching this one).
+- **Not a text key.** Geometry and resources are inputs, so the fingerprint
+  changes when structure changes even when the extracted text does not — a
+  `MediaBox` tweak is enough. It is therefore not a content-dedup or
+  text-diff key. When the question is "same text?", hash the extracted text
+  — that is the role of a receipt's `content_hash`, the NFC-normalized
+  SHA-256 of a span's text (see [Verify receipt](#verify-receipt)).
+- **Bound to one algorithm generation.** The `pdftract-v1:` prefix pins the
+  algorithm version; if the algorithm ever changes, the prefix changes with
+  it rather than the hashes drifting, so cross-generation comparisons fail
+  loudly instead of silently matching or mismatching.
+
+Against the pinned 1.2.0 binary specifically: its `hash` subcommand takes a
+bare positional path and prints the `pdftract-v1:` line alone — no `--json`
+flag exists. The SDK's generated invocation passes `--json`, so
+`client.hash(...)` throws (clap exits 2, "unexpected argument '--json'"),
+and `fastHash`, `pageCount`, and `metadata` never decode: the JSON object
+they read (`hash`, `page_count`, `fast_hash`, `metadata`) is a shape no
+released binary emits. That settles hash-vs-fastHash pragmatically: there is
+no fast/slow tier to choose between — `fast_hash` has no verified semantics
+(the "BLAKE3 of the first 10 KB" story matches no binary behavior; there is
+no BLAKE3 anywhere in the binary's source), and the only fingerprint any
+released binary produces is the structural one carried in `hash`.
 
 ### Classify document
 
@@ -458,13 +503,16 @@ Returned by `search` — see [Search](#search) for usage.
 
 ### Fingerprint
 
-Returned by `hash`.
+Returned by `hash`; field semantics are covered in
+[Hash fingerprint](#hash-fingerprint). Against the pinned 1.2.0 binary the
+method throws before any field decodes (see the note there), so these
+describe the documented contract, not 1.2.0-verified output.
 
 | Field | Type | Description |
 |---|---|---|
-| `hash` | `String` | SHA-256 hex digest of the document content |
+| `hash` | `String` | Structural fingerprint: `pdftract-v1:` + 64 lowercase hex — a SHA-256 over canonicalized document structure (decoded content streams, resource dicts, page geometry, structure tree, catalog flags), not over the file's bytes or its extracted text |
 | `pageCount` (`page_count`) | `Int` | Total number of pages |
-| `fastHash` (`fast_hash`) | `String` | BLAKE3 hex digest of the first 10 KB — cheap to compare for a quick inequality check |
+| `fastHash` (`fast_hash`) | `String` | Unverified: no released binary emits `fast_hash` (and the binary contains no BLAKE3 code), so the field has no usable semantics — treat `hash` as the only fingerprint |
 | `metadata` | `Metadata` | Document metadata — same type as above |
 
 ### Classification
