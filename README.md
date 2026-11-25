@@ -38,6 +38,19 @@ print("Title: \(doc.metadata.title ?? "Untitled")")
 let doc = try await client.extract(.url(URL(string: "https://example.com/doc.pdf")!))
 ```
 
+### Extract from in-memory Data
+
+```swift
+let data = try Data(contentsOf: pdfFileURL) // or any PDF bytes you already hold
+let doc = try await client.extract(.bytes(data))
+```
+
+Every method that takes a `Source` also accepts `.bytes` with in-memory `Data`,
+so documents received over the network or built in memory never need a file of
+their own. The SDK spills the bytes to a private temporary file for the pdftract
+process and deletes it when the call finishes — success, error, timeout, or
+cancellation — so no manual cleanup is required.
+
 ### Extract with OCR
 
 ```swift
