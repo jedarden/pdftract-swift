@@ -256,6 +256,32 @@ the tree, gate it, cut `v(X.Y.Z+1)` (patch bump for release-metadata fixes;
 semver discipline for anything behavioral). This matches the org-wide
 never-force-push rule.
 
+## Retiring a compatibility shim
+
+A naming/API compatibility shim that ships in a tag is public API from that
+moment. Retiring it after the codegen (or upstream) fix that obsoletes it is a
+**breaking change and must be a semver-major release** (`vX+1.0.0`), whose
+release notes tell consumers to move straight to the regenerated version — not
+a patch that silently drops symbols. Treat the retirement as a release event
+per the checklist above, not an ad-hoc commit, and don't let a shim rot past
+the fix: the moment a regenerated drop carries the real names natively, the
+shim is dead weight and the next release should retire it.
+
+Precedent — the ADR-1 lowerCamelCase shim (bf-b6j, `6e19810d`) never had to
+meet this bar: it lived only 2026-07-22 09:41→11:03, from add to bf-1b5's drop
+(`d7009cba`) once upstream pdftract registered the `lc_first` Tera filter
+(`54b432f8`) and `Methods.swift.tera` was regenerated with all nine methods
+lowerCamelCase natively. Both shipped releases postdate the drop, so no
+shim-era symbol ever reached a tag and **no semver-major was owed** — cutting
+one anyway would have shipped a major with no breaking change in it. Prove
+what a tag actually shipped before classifying a shim-drop as breaking:
+
+```bash
+git grep -E "public func [A-Z]" v1.1.0 -- "Sources/"   # empty here: nothing shipped
+```
+
+Breaking is a property of what shipped, not of what the diff removes.
+
 ## History
 
 - **v1.1.0** — 2026-09-24, bf-4mw. First tag; cut ad hoc, which is why this
