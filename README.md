@@ -78,16 +78,23 @@ let md = try await client.extractMarkdown(.path("document.pdf"))
 
 ### Stream extraction (for large PDFs)
 
+`extractStream` returns an `AsyncThrowingStream<Page, Error>`, so iterate it
+with `for try await` — extraction failures throw from the loop (see
+[Errors from the streaming methods](#errors-from-the-streaming-methods)):
+
 ```swift
-for await page in client.extractStream(.path("large.pdf")) {
+for try await page in client.extractStream(.path("large.pdf")) {
     print("Page \(page.pageIndex + 1): \(page.blocks.count) blocks")
 }
 ```
 
 ### Search
 
+`search` returns an `AsyncThrowingStream<Match, Error>` and throws the same
+way:
+
 ```swift
-for await match in client.search(.path("document.pdf"), "invoice") {
+for try await match in client.search(.path("document.pdf"), "invoice") {
     print("Found on page \(match.page + 1): \(match.text)")
     print("  Context: ...\(match.context.before)[\(match.text)]\(match.context.after)...")
 }
@@ -229,6 +236,35 @@ lifecycle errors come from the SDK instead (see the next section):
 |-------|-----------|-------------|
 | `TimeoutError` | -1 | The process outlived the caller-provided `timeout:` and was terminated |
 | `CancellationError` | — | The surrounding Swift `Task` was cancelled; the process was terminated |
+
+### Errors from the streaming methods
+
+`extractStream` and `search` return `AsyncThrowingStream`s and throw the same
+error types as the buffered methods — iterate them with `for try await`:
+
+```swift
+do {
+    for try await page in client.extractStream(.path("maybe-corrupt.pdf")) {
+        render(page) // every page the child emitted before failing still arrives
+    }
+} catch let error as PdftractError {
+    print("Stream failed (code \(error.exitCode)): \(error.localizedDescription)")
+}
+```
+
+A failure finishes the stream rather than interrupting it: the values the
+child produced before dying are yielded to the loop first, and the mapped
+error throws when the stream ends. A corrupt PDF that kills `pdftract`
+halfway through emitting pages therefore surfaces as the already-decoded
+pages followed by `CorruptPdfError` — never as a silently short stream. A
+failure before the child produces any output (unreadable source, missing
+binary, TLS failure on a remote URL) throws before the first value, so the
+loop body never runs.
+
+Lines the decoder cannot parse are deliberately **not** thrown — they are
+reported through the `onSkippedLine:` callback so one malformed line cannot
+masquerade as a failed extraction. An undecodable line passed over silently
+would be indistinguishable from a PDF that simply had fewer pages.
 
 ## Cancellation and timeouts
 
