@@ -13,12 +13,32 @@
 // stream suites pin lifecycle behavior — stderr draining
 // (StreamingStderrRegressionTests) and exit-code mapping
 // (ExitCodeMappingTests) — but nothing asserted the *functional* output.
-// These tests pin the documented contract against a real binary:
+// These tests were written as the documented contract against a real binary:
 //   1. pages arrive in document order,
 //   2. pageIndex is 0-based and increments by one per page,
 //   3. each streamed page's blocks equal the same page's blocks from
 //      `extract()` for the same input,
 //   4. a trivial zero-page PDF yields an empty stream.
+//
+// Reality (first real-binary run, 2026-11-25, bead pdfswift-3307a377, via
+// scripts/e2e-binary-verification.sh against
+// pdftract-v1.2.0-x86_64-unknown-linux-musl): the release binary's
+// `extract --ndjson` emits one *block* per line ({bbox, block_index, kind,
+// page, spans}), none of which decode into this SDK's `Page` (which requires
+// page_index/width/height/rotation) — so against that binary the stream
+// yields ZERO pages, every line surfacing through `onSkippedLine`, while the
+// buffered `extract()` dies in clap before producing anything to compare
+// against (`--json` is a valueless flag to the generator, an output-PATH
+// option to the CLI). Assertions 1–3 have therefore never passed against any
+// real binary — they skipped in every gate until the e2e script existed.
+// Tests 1–3 are reality pins now, the convention
+// DocumentedApiConformanceTests established: each asserts the binary's
+// CURRENT behavior and its comment names the documented contract (the
+// original assertion, kept verbatim) to flip back to when the generator
+// converges with the binary (proposal pdfswift-ccccb2ff). Test 4 holds as
+// written (zero lines in, zero pages out) and stays a contract test. A green
+// run here must never be read as "the README contract holds against a real
+// binary" — for that, see the flip notes per test.
 //
 // Every assertion needs pdftract's real NDJSON output — no stub can vouch for
 // a page's contents — so each test throws XCTSkip when no pdftract binary can
@@ -28,9 +48,10 @@
 // filters it out (--filter 'StreamingStderrRegressionTests|ExitCodeMappingTests'),
 // and although the publish gate's --filter ConformanceTests regex matches this
 // class name, that workflow provisions no pdftract binary, so the guard fires
-// there as well. Running these for real needs a binary on PATH locally —
-// e.g. docker run swift:5.10-jammy over a clean extraction, with a pdftract
-// binary on PATH — the same standing as the other binary-gated suites.
+// there as well. Running these for real is what scripts/e2e-binary-verification.sh
+// does: it installs the pinned release and runs the full suite with it on
+// PATH, refusing a run in which anything skipped — the standing way to
+// exercise this suite against a real binary.
 //
 // Fixtures are synthesized in-code: minimal, structurally valid PDFs (catalog,
 // page tree, one Helvetica text run per page, one shared font) written to the
@@ -132,35 +153,58 @@ final class ExtractStreamConformanceTests: XCTestCase {
         return pages
     }
 
-    // MARK: The documented contract
+    /// Thread-safe collector for `onSkippedLine`. The callback runs on the
+    /// stream's producer Task while the consuming test awaits the loop, so a
+    /// plain array would be a data race (the same shape as
+    /// DocumentedApiConformanceTests.SkippedLineCollector).
+    private final class SkippedLineCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [Error] = []
 
-    /// Streamed pages arrive in document order: page `i` of the stream carries
-    /// page `i`'s marker text, so arrival follows the document's page tree
-    /// rather than merely an increasing counter.
-    func testPagesArriveInDocumentOrder() async throws {
-        let binary = try Self.requireBinary()
-        let pageCount = 4
-        let fixture = try Self.makePDF(
-            pageTexts: (0..<pageCount).map { "\(Self.markerPrefix) \($0)" }
-        )
-        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+        func record(_ error: Error) {
+            lock.lock()
+            defer { lock.unlock() }
+            storage.append(error)
+        }
 
-        let client = Pdftract(binaryPath: binary)
-        let pages = try await Self.drain(client.extractStream(.path(fixture.path)))
+        var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage.count
+        }
 
-        XCTAssertEqual(pages.count, pageCount, "expected one streamed page per fixture page")
-        for (index, page) in pages.enumerated() {
-            let blockText = page.blocks.map { $0.text }.joined(separator: " ")
-            XCTAssertTrue(
-                blockText.contains("\(Self.markerPrefix) \(index)"),
-                "stream position \(index) carried blocks for a different page: \(blockText)"
-            )
+        /// Every recorded error as a `DecodingError`? The stream surfaces
+        /// exactly the JSONDecoder failure for each undecodable line.
+        var allAreDecodingErrors: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage.allSatisfy { $0 is DecodingError }
         }
     }
 
-    /// pageIndex follows the documented 0-based convention: it starts at 0 and
-    /// increments by exactly one per page, with no gaps or repeats.
-    func testPageIndexIsZeroBasedAndIncrementing() async throws {
+    // MARK: The stream-output pins — block-per-line divergence (see header)
+
+    /// PIN, not contract. The README presents `extractStream` as yielding
+    /// pages in document order (stream position `i` carries page `i`'s
+    /// marker text) with a zero-based, incrementing `pageIndex` — the two
+    /// documented assertions this test replaced (the former
+    /// testPagesArriveInDocumentOrder and
+    /// testPageIndexIsZeroBasedAndIncrementing, which drove the identical
+    /// path and so pinned the identical reality). Against the release
+    /// binary the stream never yields a page at all: `extract --ndjson`
+    /// emits one *block* per line ({bbox, block_index, kind, page, spans}),
+    /// none of which decode into this SDK's `Page`, so every line surfaces
+    /// through `onSkippedLine` as the JSONDecoder failure while the drain
+    /// completes cleanly with zero pages. The skipped count is exactly the
+    /// fixture's page count because each synthesized page carries exactly
+    /// one text block — a truncation or partial read would under-count, and
+    /// a line that DID decode would mean the binary's NDJSON converged.
+    /// When the binary's `--ndjson` emits `Page`-shaped lines, this reds —
+    /// flip it back to the two documented assertions it replaced: pages
+    /// arrive in document order (stream position `i` carries
+    /// `"\(markerPrefix) \(i)"` in its blocks) and
+    /// `pages.map(\.pageIndex) == Array(0..<pageCount)`.
+    func testStreamYieldsZeroPagesPinningTheBlockLineDivergence() async throws {
         let binary = try Self.requireBinary()
         let pageCount = 3
         let fixture = try Self.makePDF(
@@ -168,23 +212,51 @@ final class ExtractStreamConformanceTests: XCTestCase {
         )
         defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
 
+        let collector = SkippedLineCollector()
         let client = Pdftract(binaryPath: binary)
-        let pages = try await Self.drain(client.extractStream(.path(fixture.path)))
 
-        XCTAssertEqual(pages.count, pageCount)
+        // A throw here would mean the child failed — the pinned reality is
+        // a clean child exit whose lines are all undecodable, not an error.
+        let pages = try await Self.drain(
+            client.extractStream(.path(fixture.path), onSkippedLine: { collector.record($0) })
+        )
+
         XCTAssertEqual(
-            pages.map { $0.pageIndex },
-            Array(0..<pageCount),
-            "pageIndex must start at 0 and increment by one per page"
+            pages.count, 0,
+            "block-shaped NDJSON lines must not decode into Pages; the stream yielded \(pages.count) — the block-line pin is stale, restore the documented order/pageIndex assertions"
+        )
+        XCTAssertEqual(
+            collector.count, pageCount,
+            "expected one undecodable NDJSON line per fixture page (one block each), got \(collector.count)"
+        )
+        XCTAssertTrue(
+            collector.allAreDecodingErrors,
+            "onSkippedLine must surface the JSONDecoder failure for each block-shaped line"
         )
     }
 
-    /// Each streamed page's blocks are the same blocks `extract()` returns for
-    /// the same input, page for page — the README's two paths must agree on
-    /// the content they hand the caller. Blocks are compared through their
-    /// JSON encoding: `Block` is Codable but not Equatable, and encoding is
-    /// deterministic for these key-order-stable structs.
-    func testStreamedPageBlocksMatchExtract() async throws {
+    /// PIN, not contract. The README promises the two paths agree on the
+    /// content they hand the caller — each streamed page's blocks equal the
+    /// same page's blocks from `extract()` for the same input (the former
+    /// testStreamedPageBlocksMatchExtract compared them through their JSON
+    /// encoding: `Block` is Codable but not Equatable, and encoding is
+    /// deterministic for these key-order-stable structs). Against the
+    /// release binary that agreement is unreachable at BOTH layers on the
+    /// same input, which is what this pin holds:
+    ///
+    /// - the stream yields zero pages — every `--ndjson` line is
+    ///   block-shaped and fails `Page` decode (the pin above), so there is
+    ///   nothing on the streamed side to compare;
+    /// - the buffered `extract()` dies in clap before producing anything to
+    ///   compare against: the generator passes `--json` as a valueless flag
+    ///   while the CLI's `--json <PATH>` takes an output path (`-` for
+    ///   stdout), so the child exits 2 with "a value is required for
+    ///   '--json <PATH>'" — mapped to `CorruptPdfError`.
+    ///
+    /// When both layers converge, flip back to the documented assertion:
+    /// streamed count equals `buffered.pages.count`, per-page `pageIndex`
+    /// equality, and JSON-encoded block equality per stream position.
+    func testStreamAndExtractDisagreeAtBothLayersPinningTheBufferedArgvDivergence() async throws {
         let binary = try Self.requireBinary()
         let pageCount = 3
         let fixture = try Self.makePDF(
@@ -193,25 +265,42 @@ final class ExtractStreamConformanceTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
 
         let client = Pdftract(binaryPath: binary)
-        let streamed = try await Self.drain(client.extractStream(.path(fixture.path)))
-        let buffered = try await client.extract(.path(fixture.path))
 
-        XCTAssertEqual(streamed.count, buffered.pages.count,
-                       "stream and extract disagree on page count for the same input")
-        for (index, page) in streamed.enumerated() {
-            let bufferedPage = buffered.pages[index]
-            XCTAssertEqual(page.pageIndex, bufferedPage.pageIndex,
-                           "stream position \(index) disagrees with extract on pageIndex")
+        // Stream side: clean drain, zero decodable pages (the block-line
+        // divergence; asserted here so this pin fails independently of the
+        // other one if either half moves).
+        let collector = SkippedLineCollector()
+        let streamed = try await Self.drain(
+            client.extractStream(.path(fixture.path), onSkippedLine: { collector.record($0) })
+        )
+        XCTAssertEqual(
+            streamed.count, 0,
+            "streamed pages arrived — the stream-side half of the pin is stale"
+        )
+        XCTAssertEqual(collector.count, pageCount)
+
+        // Buffered side: the child dies in argument parsing.
+        do {
+            _ = try await client.extract(.path(fixture.path))
+            XCTFail("extract returned — the buffered argv half of the pin is stale; restore the documented stream/extract blocks-equality assertions")
+        } catch let error as PdftractError {
             XCTAssertEqual(
-                try JSONEncoder().encode(page.blocks),
-                try JSONEncoder().encode(bufferedPage.blocks),
-                "stream position \(index)'s blocks differ from extract()'s page \(index) blocks"
+                error.exitCode, 2,
+                "expected the child's clap usage error (exit 2), got exit \(error.exitCode)"
+            )
+            XCTAssertTrue(
+                error.message.contains("a value is required for '--json <PATH>'"),
+                "expected the '--json <PATH>' usage error, got: \(error.message.prefix(200))"
             )
         }
     }
 
     /// A trivial zero-page PDF yields a zero-page stream — not an error and
-    /// not a phantom page.
+    /// not a phantom page. The one documented-contract test here that holds
+    /// against the release binary as-is: a zero-page PDF produces zero
+    /// NDJSON lines, so the divergence pinned above has nothing to bite on
+    /// and the documented result (an empty stream, not an error) is
+    /// observable reality.
     func testTrivialEmptyPdfYieldsZeroPages() async throws {
         let binary = try Self.requireBinary()
         let fixture = try Self.makePDF(pageTexts: [])

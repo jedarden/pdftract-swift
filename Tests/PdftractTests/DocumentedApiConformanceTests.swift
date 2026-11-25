@@ -2,7 +2,12 @@
 // Real-binary conformance pins for the README-documented APIs that had no
 // test coverage anywhere: `extractText`, `extractMarkdown`, `hash`,
 // `classify`, `search`, and the `.url` / `.bytes` `Source` cases
-// (pdfswift-a53be3d4; search folded in by pdfswift-41c46c80).
+// (pdfswift-a53be3d4; search folded in by pdfswift-41c46c80), joined by
+// `getMetadata` and the end-to-end `verifyReceipt` pair on 2026-11-25
+// (pdfswift-3307a377) — the last two operations that had no real-binary
+// coverage, plus the decode-layer "serialization twins" that feed REAL
+// binary stdout into the SDK's decoders for the types whose argv layer is
+// dead.
 //
 // Hand-written, not generated: this file is not a codegen template output, so
 // `pdftract sdk codegen` leaves it alone (the generator only writes files that
@@ -843,6 +848,339 @@ final class DocumentedApiConformanceTests: XCTestCase {
         XCTAssertEqual(
             argv, ["grep", "--", Self.markerPrefix, fixture.path],
             "search() must invoke grep with the pattern after the -- separator, before the fixture path (pdfswift-4e62b1ac)"
+        )
+    }
+
+    // MARK: The serialization twins — real stdout JSON into the SDK types
+    // (pdfswift-3307a377)
+
+    /// A helper-level failure inside the probes below (bad fixture shape,
+    /// unexpected child exit). Throwing it fails the test with the message
+    /// attached, the same way an assertion would.
+    private struct ProbeFailure: Error, CustomStringConvertible {
+        let message: String
+        var description: String { message }
+        init(_ message: String) { self.message = message }
+    }
+
+    /// Runs the resolved binary with `arguments` verbatim, returning stdout,
+    /// stderr, and the child's exit status. This is how the tests below feed
+    /// REAL binary output into the SDK's decoders: the generated methods
+    /// cannot reach these outputs (that divergence is what the argv pins
+    /// hold), so this helper separates the two layers those pins
+    /// distinguish — argv reachability and wire-schema compatibility. Stderr
+    /// is read after exit; the outputs these probes collect (a 2-page
+    /// fixture's JSON) sit far below any pipe buffer limit.
+    private static func runBinary(
+        _ binary: String,
+        arguments: [String]
+    ) throws -> (stdout: Data, stderr: Data, exitCode: Int32) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binary)
+        process.arguments = arguments
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        let out = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let err = stderr.fileHandleForReading.readDataToEndOfFile()
+        return (out, err, process.terminationStatus)
+    }
+
+    /// Produces a real receipt for `fixture` exactly the way the `Receipt`
+    /// type's documentation describes: `extract --receipts lite` embeds a
+    /// receipt object (pdf_fingerprint, page_index, bbox, content_hash,
+    /// extraction_version) on every span and block, and this saves the first
+    /// span's receipt to its own JSON file — the artifact `Receipt.data`
+    /// hands to `verify-receipt` as its `RECEIPT.json` positional. Returns
+    /// that path plus the pdf_fingerprint the receipt carries, so a pin can
+    /// confront the extractor's fingerprint with the verifier's recomputed
+    /// one. The caller owns the returned file's directory (a temp dir to
+    /// remove).
+    private static func produceReceipt(
+        binary: String,
+        fixture: URL
+    ) throws -> (receiptPath: String, receiptDir: URL, pdfFingerprint: String) {
+        let run = try runBinary(binary, arguments: [
+            "extract", "--receipts", "lite", "--json", "-", "--", fixture.path,
+        ])
+        guard run.exitCode == 0 else {
+            throw ProbeFailure(
+                "extract --receipts lite exited \(run.exitCode): \(String(decoding: run.stderr, as: UTF8.self).prefix(200))"
+            )
+        }
+        guard let doc = try JSONSerialization.jsonObject(with: run.stdout) as? [String: Any],
+              let pages = doc["pages"] as? [[String: Any]],
+              let spans = pages.first?["spans"] as? [[String: Any]],
+              let receipt = spans.first?["receipt"] as? [String: Any],
+              let fingerprint = receipt["pdf_fingerprint"] as? String else {
+            throw ProbeFailure("extract --receipts lite stdout carried no span receipt — the fixture or flag regressed")
+        }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdftract-receipt-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let receiptURL = directory.appendingPathComponent("receipt.json")
+        try JSONSerialization.data(withJSONObject: receipt, options: [.prettyPrinted])
+            .write(to: receiptURL)
+        return (receiptURL.path, directory, fingerprint)
+    }
+
+    /// PIN, not contract. README "Get metadata" promises
+    /// `client.getMetadata(.path("document.pdf"))` returns the document's
+    /// metadata. Against the release binary the generated argv dies in
+    /// clap: the CLI's extract has no `--metadata-only` flag at all (its
+    /// option surface is the output-format PATHs, page ranges, receipts,
+    /// cache and include toggles), so the child exits 2 with the
+    /// unexpected-argument usage error before the fixture is even opened.
+    /// The decode layer itself is compatible — the binary's real
+    /// `metadata` object decodes into this SDK's `Metadata` (the twin
+    /// below) — but no generated argv reaches it. When the generator
+    /// converges, this reds — flip it to asserting
+    /// `metadata.pageCount == <fixture page count>` the way the twin
+    /// already does decode-side.
+    func testGetMetadataPinsTheCurrentArgvDivergence() async throws {
+        let binary = try Self.requireBinary()
+        let fixture = try Self.makePDF(pageTexts: ["\(Self.markerPrefix) 0"])
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+
+        let client = Pdftract(binaryPath: binary)
+        do {
+            _ = try await client.getMetadata(.path(fixture.path))
+            XCTFail("getMetadata returned — the argv divergence pin is stale; assert the documented Metadata contract instead")
+        } catch let error as PdftractError {
+            XCTAssertEqual(
+                error.exitCode, 2,
+                "expected the child's clap usage error (exit 2), got exit \(error.exitCode)"
+            )
+            XCTAssertTrue(
+                error.message.contains("unexpected argument '--metadata-only' found"),
+                "expected the unexpected-'--metadata-only' usage error, got: \(error.message.prefix(200))"
+            )
+        }
+    }
+
+    /// The serialization twin for `Metadata`: the release binary's REAL
+    /// `extract --json -` stdout, its `metadata` member fed to the SDK's
+    /// `Metadata` decoder. The argv layer is dead (the pin above) — this
+    /// test exists to show the wire schema itself is not: the binary's
+    /// metadata object carries `page_count` (the one non-optional key
+    /// `Metadata` requires) and the synthesized decoder ignores the
+    /// binary's extra members (block_count, span_count, cache_status,
+    /// cache_age_seconds, reading_order_algorithm), so the decode layer
+    /// would work the moment a converged argv reaches it. Driven through
+    /// `runBinary` with the correct argv (`--json -`), not through the SDK.
+    func testBinaryMetadataObjectDecodesIntoTheSdkMetadataType() async throws {
+        let binary = try Self.requireBinary()
+        let pageCount = 2
+        let fixture = try Self.makePDF(
+            pageTexts: (0..<pageCount).map { "\(Self.markerPrefix) \($0)" }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+
+        let run = try Self.runBinary(
+            binary, arguments: ["extract", "--json", "-", "--", fixture.path]
+        )
+        XCTAssertEqual(run.exitCode, 0, "extract --json - must exit cleanly on the fixture")
+
+        guard let doc = try JSONSerialization.jsonObject(with: run.stdout) as? [String: Any],
+              let metadataObject = doc["metadata"] else {
+            throw ProbeFailure("extract --json - stdout carried no metadata member")
+        }
+        let metadataData = try JSONSerialization.data(withJSONObject: metadataObject)
+        let metadata = try JSONDecoder().decode(Metadata.self, from: metadataData)
+
+        XCTAssertEqual(
+            metadata.pageCount, pageCount,
+            "Metadata.pageCount must decode the binary's real page_count"
+        )
+        // The fixture carries no document-info dictionary, so every
+        // optional metadata key decodes to nil — the absence tolerance the
+        // SDK type guarantees the wire.
+        XCTAssertNil(metadata.title)
+        XCTAssertNil(metadata.author)
+        XCTAssertNil(metadata.producer)
+    }
+
+    /// PIN for the buffered extraction's wire schema: the release binary's
+    /// real `extract --json -` stdout cannot decode into the SDK's
+    /// `Document` — the decoder fails on `schema_version` first (the key
+    /// does not exist in the binary's output; behind it, the binary's
+    /// pages carry `index` rather than `page_index` and no
+    /// `width`/`height`/`rotation`, three more keyNotFound failures queued
+    /// behind the first). This is the buffered extraction's second
+    /// divergence layer, behind the argv layer the stream-side pins hold —
+    /// even a corrected argv would surface this drift. When the binary
+    /// emits Document-shaped JSON, this reds — flip to asserting the
+    /// decoded document's page count and per-page marker text.
+    func testBufferedDocumentDecodePinsTheSchemaVersionDrift() async throws {
+        let binary = try Self.requireBinary()
+        let fixture = try Self.makePDF(
+            pageTexts: (0..<2).map { "\(Self.markerPrefix) \($0)" }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+
+        let run = try Self.runBinary(
+            binary, arguments: ["extract", "--json", "-", "--", fixture.path]
+        )
+        XCTAssertEqual(run.exitCode, 0, "extract --json - must exit cleanly on the fixture")
+
+        do {
+            _ = try JSONDecoder().decode(Document.self, from: run.stdout)
+            XCTFail("Document decoded — the schema-drift pin is stale; assert the decoded document's pages instead")
+        } catch let error as DecodingError {
+            guard case .keyNotFound(let key, _) = error else {
+                XCTFail("expected keyNotFound on schema_version, got \(error)")
+                return
+            }
+            XCTAssertEqual(
+                key.stringValue, "schema_version",
+                "the first missing key must be schema_version — the binary's output has no schema version"
+            )
+        } catch {
+            XCTFail("expected a DecodingError, got \(error)")
+        }
+    }
+
+    /// The leaf-type serialization twin: the binary's real buffered JSON
+    /// `pages[0]` members decode into the SDK's `[Block]` and `[Span]`
+    /// arrays. The page wrapper does not (the schema pin above) — but the
+    /// leaves do, because the SDK's leaf fields (kind/text/bbox for
+    /// `Block`; text/bbox/font/size with optional confidence for `Span`)
+    /// are a strict subset of the binary's members and the synthesized
+    /// decoders ignore the extras (block-level spans array, span-level
+    /// color, rendering_mode, confidence_source). This compatibility is
+    /// what any argv fix would immediately expose — pinned here so a leaf
+    /// regression cannot hide behind the page-level failure.
+    func testBufferedLeafTypesDecodeFromTheRealJson() async throws {
+        let binary = try Self.requireBinary()
+        let fixture = try Self.makePDF(pageTexts: ["\(Self.markerPrefix) 0"])
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+
+        let run = try Self.runBinary(
+            binary, arguments: ["extract", "--json", "-", "--", fixture.path]
+        )
+        XCTAssertEqual(run.exitCode, 0, "extract --json - must exit cleanly on the fixture")
+
+        guard let doc = try JSONSerialization.jsonObject(with: run.stdout) as? [String: Any],
+              let pages = doc["pages"] as? [[String: Any]],
+              let firstPage = pages.first,
+              let blockObjects = firstPage["blocks"] as? [Any],
+              let spanObjects = firstPage["spans"] as? [Any] else {
+            throw ProbeFailure("extract --json - stdout carried no pages[0] blocks/spans")
+        }
+
+        let blocks = try JSONDecoder().decode(
+            [Block].self,
+            from: try JSONSerialization.data(withJSONObject: blockObjects)
+        )
+        XCTAssertEqual(blocks.count, 1, "the fixture's single text block must decode")
+        XCTAssertEqual(blocks.first?.kind, "paragraph")
+        XCTAssertEqual(blocks.first?.text, "\(Self.markerPrefix) 0")
+        XCTAssertEqual(blocks.first?.bbox.count, 4)
+        XCTAssertNil(blocks.first?.level, "the binary emits no level for paragraph blocks; the SDK's optional must decode to nil")
+
+        let spans = try JSONDecoder().decode(
+            [Span].self,
+            from: try JSONSerialization.data(withJSONObject: spanObjects)
+        )
+        XCTAssertEqual(spans.count, 1, "the fixture's single span must decode")
+        XCTAssertEqual(spans.first?.text, "\(Self.markerPrefix) 0")
+        XCTAssertEqual(spans.first?.bbox.count, 4)
+        XCTAssertEqual(spans.first?.size ?? 0, 12.0, accuracy: 0.001)
+        XCTAssertEqual(spans.first?.confidence ?? -1, 1.0, accuracy: 0.0001)
+    }
+
+    /// The full SDK→binary→SDK path, exercised for real: `verify-receipt`
+    /// is the one subcommand whose CLI contract the generated argv already
+    /// matches (boolean `--json`, `<FILE.pdf> <RECEIPT.json>` positionals —
+    /// the divergence inventory's lone argv-conforming method), so
+    /// `client.verifyReceipt` genuinely drives the release binary end to
+    /// end — SDK argv, real child, real receipt. The receipt is real too,
+    /// produced by the same binary from the same fixture via
+    /// `extract --receipts lite` (the `Receipt` docs' recipe). The pin:
+    /// verification still fails, because the binary's verifier recomputes a
+    /// DIFFERENT pdf fingerprint from the same file than `extract` embeds
+    /// in receipts (stable on both sides across runs;
+    /// v1.2.0-binary-divergence-inventory.md documents extract/hash vs
+    /// verify-receipt producing three values) — so every receipt dies at
+    /// check 1 with exit 10, which the SDK maps to `ReceiptVerifyError`
+    /// carrying the child's (empty) stderr as its message. When the
+    /// binary's verifier converges with the extractor's fingerprint, this
+    /// reds — flip to asserting `result.valid == true` on the same receipt,
+    /// with the decode twin below keeping the wire schema honest.
+    func testVerifyReceiptDrivesTheReleaseBinaryEndToEndAndPinsTheFingerprintGate() async throws {
+        let binary = try Self.requireBinary()
+        let fixture = try Self.makePDF(
+            pageTexts: (0..<2).map { "\(Self.markerPrefix) \($0)" }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+        let receipt = try Self.produceReceipt(binary: binary, fixture: fixture)
+        defer { try? FileManager.default.removeItem(at: receipt.receiptDir) }
+
+        let client = Pdftract(binaryPath: binary)
+        do {
+            _ = try await client.verifyReceipt(
+                fixture.path, receipt: Receipt(data: receipt.receiptPath)
+            )
+            XCTFail("verifyReceipt returned — the fingerprint-gate pin is stale; assert result.valid == true instead")
+        } catch let error as ReceiptVerifyError {
+            XCTAssertEqual(
+                error.exitCode, 10,
+                "expected the binary's fingerprint_mismatch exit (10), got exit \(error.exitCode)"
+            )
+        } catch {
+            XCTFail("expected ReceiptVerifyError (exit 10), got \(type(of: error)): \(error)")
+        }
+    }
+
+    /// The verifyReceipt serialization twin: the release binary's REAL
+    /// `verify-receipt --json` stdout — spawned with the exact argv the SDK
+    /// builds — decodes into `ReceiptVerificationResult` with every
+    /// documented field populated: `status` in the CLI's failure vocabulary
+    /// ("fingerprint_mismatch" — check 1, per the end-to-end pin above),
+    /// `best_iou` at 0 (no span was ever compared), the
+    /// expected/actual content-hash pair, and `error` carrying the CLI's
+    /// explanation — so `valid` is false and `reason` non-nil, the shape
+    /// the struct's docs describe for decodes outside `verifyReceipt`
+    /// (which throws instead). The recomputed fingerprint in the decode is
+    /// asserted DIFFERENT from the receipt's — the executable form of the
+    /// divergence that makes the check fail. This is the only operation
+    /// whose real wire output this SDK decodes today: the schema-level
+    /// proof that the SDK surface is sound wherever the wire agrees.
+    func testVerifyReceiptJsonDecodesIntoReceiptVerificationResult() async throws {
+        let binary = try Self.requireBinary()
+        let fixture = try Self.makePDF(
+            pageTexts: (0..<2).map { "\(Self.markerPrefix) \($0)" }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+        let receipt = try Self.produceReceipt(binary: binary, fixture: fixture)
+        defer { try? FileManager.default.removeItem(at: receipt.receiptDir) }
+
+        let run = try Self.runBinary(
+            binary,
+            arguments: ["verify-receipt", "--json", "--", fixture.path, receipt.receiptPath]
+        )
+        XCTAssertEqual(
+            run.exitCode, 10,
+            "expected the fingerprint_mismatch exit (10); stderr: \(String(decoding: run.stderr, as: UTF8.self).prefix(200))"
+        )
+
+        let result = try JSONDecoder().decode(
+            ReceiptVerificationResult.self, from: run.stdout
+        )
+        XCTAssertEqual(result.status, "fingerprint_mismatch")
+        XCTAssertFalse(result.valid, "status fingerprint_mismatch must not decode as valid")
+        XCTAssertEqual(result.bestIou, 0.0, accuracy: 1e-12)
+        XCTAssertNotNil(result.reason, "the failure explanation must decode from the CLI's error field")
+        XCTAssertEqual(
+            result.expectedContentHash, receipt.pdfFingerprint,
+            "the receipt-side fingerprint must decode as the expected hash"
+        )
+        XCTAssertNotEqual(
+            result.actualContentHash, result.expectedContentHash,
+            "the verifier's recomputed fingerprint must differ from the receipt's — the divergence the check fails on"
         )
     }
 }

@@ -582,6 +582,26 @@ message carrying the underlying spawn error. The streaming methods
 (`extractStream`, `search`) finish their iteration by throwing that spawn error
 unwrapped, with nothing yielded.
 
+### Verifying against the pinned release end to end
+
+The release above is also what this repository's own end-to-end check runs
+against:
+
+```sh
+scripts/e2e-binary-verification.sh
+```
+
+The script downloads that release (verifying it against the published
+`SHA256SUMS`), runs the full test suite in the same `swift:5.10-jammy` image
+the CI gate uses with the binary on PATH, and fails if any test fails **or
+skips**. The skip rule is the point: the binary-gated conformance suites
+(`ConformanceTests`, `ExtractStreamConformanceTests`,
+`DocumentedApiConformanceTests`) silently skip wherever no binary is
+installed — which is every other gate — so a provisioning failure would
+otherwise look exactly like a green run. A red result means reality moved
+against the pinned pins' expectations; each failing pin's comment names the
+documented contract to flip to.
+
 ## Error handling
 
 All methods are `async throws` and can throw the following errors:
