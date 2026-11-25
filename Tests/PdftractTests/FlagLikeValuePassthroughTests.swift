@@ -80,11 +80,12 @@ final class FlagLikeValuePassthroughTests: XCTestCase {
     /// Writes an executable stub `pdftract` that records its argv one
     /// argument per line into `<directory>/captured-argv.txt`, prints
     /// `stdout`, and exits with `exitCode`. Additionally, every argv element
-    /// matching `-*.pdf` is copied through `cat --` into
-    /// `<directory>/captured-input.bin`: `cat --` (unlike the `[ -f … ]`
-    /// guard other stubs use) accepts an operand beginning with `-`, so the
-    /// dash-named file's content can be verified without the test utility
-    // itself tripping over flag parsing.
+    /// naming a dash-leading `.pdf` — either bare (`-report.pdf`) or under a
+    /// directory (`/tmp/…/-report.pdf`, whose full path starts with `/`) —
+    /// is copied through `cat --` into `<directory>/captured-input.bin`:
+    /// `cat --` (unlike the `[ -f … ]` guard other stubs use) accepts an
+    /// operand beginning with `-`, so the dash-named file's content can be
+    /// verified without the test utility itself tripping over flag parsing.
     private static func writeArgCapturingStub(
         stdout: String,
         exitCode: Int = 0
@@ -101,7 +102,7 @@ final class FlagLikeValuePassthroughTests: XCTestCase {
         script += "printf '%s\\n' \"$@\" > '\(captureURL.path)'\n"
         script += "for arg in \"$@\"; do\n"
         script += "  case \"$arg\" in\n"
-        script += "    -*.pdf) cat -- \"$arg\" >> '\(inputCopyURL.path)' 2>/dev/null ;;\n"
+        script += "    -*.pdf|*/-*.pdf) cat -- \"$arg\" >> '\(inputCopyURL.path)' 2>/dev/null ;;\n"
         script += "  esac\n"
         script += "done\n"
         if exitCode != 0 {
