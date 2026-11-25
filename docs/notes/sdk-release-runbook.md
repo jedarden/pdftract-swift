@@ -27,6 +27,86 @@ Tag format is **`v`-prefixed** (`v1.1.0`, `v1.2.0` — both annotated). SwiftPM
 strips an optional leading `v` when matching, so `v1.2.0` satisfies
 `from: "1.2.0"`. Do not also push an unprefixed twin — one version, one tag.
 
+## Canonical consumer URL (decision)
+
+**Decision (pdfswift-63bde4de, 2026-11-25): consumers install from the GitHub
+mirror URL — `https://github.com/jedarden/pdftract-swift`. Forgejo is never
+cited to consumers.** Every snippet, announcement, and generated README points
+at the GitHub URL; this section records why, what that obligates, and what
+would flip it.
+
+Why GitHub stays canonical:
+
+- **SwiftPM resolves anonymously, and Forgejo is not anonymously readable.**
+  `swift package resolve` speaks anonymous HTTPS to the package URL; it cannot
+  authenticate. As of 2026-11-25 the Forgejo repo answers **401** to an
+  anonymous `/info/refs?service=git-upload-pack` (push-created repos start
+  private, and the instance is not a consumer-facing host), while the GitHub
+  mirror answers **200**. A Forgejo `from:` requirement would fail for every
+  consumer on day one — not a mirror risk, a certainty.
+- **The mirror is the only place both tags are publicly visible.** Checked
+  2026-11-25: `v1.1.0` and `v1.2.0` present on GitHub with `^{}`-peeled SHAs
+  matching Forgejo `origin` and local.
+- The org hosting convention (Forgejo primary, GitHub read-only mirror)
+  governs *development pushes*, not consumer resolution. Consumers were never
+  the mirror's purpose — the public portfolio is — but for this repo the
+  mirror is also the only anonymous read path, so it is the consumer URL of
+  record.
+
+What this decision obligates:
+
+- **Mirror health is release-critical, not hygiene.** Steps 3–4 of the
+  checklist (force the sync, verify the tag on the mirror) are mandatory for
+  every release *and* any tag-only push, because a tag that lives only on
+  Forgejo is invisible to every `from:` requirement (the 2026-09-24 gotcha).
+- The mirror is one-way, server-side. Never push to GitHub client-side — that
+  diverges the mirror from its source of truth.
+- **If the README URL ever changes**, the change routes through the pdftract
+  template (`templates/sdk-skeleton/swift/README.md.tera`, the
+  `.package(url: ...)` line) and a `--version`-stamped codegen refresh — never
+  a hand edit of the generated `README.md`. The decision above keeps the
+  GitHub URL, so no template change ships with it.
+
+Flip conditions — re-decide only if **all** of these hold:
+
+1. The Forgejo repo is flipped anonymously readable (curl its `info/refs`
+   endpoint: 200, not 401).
+2. `git.ardenone.com` is proven reachable for anonymous consumer traffic from
+   outside the tailnet.
+3. There is a concrete reason to stop depending on the GitHub mirror (not
+   just symmetry with the org convention).
+
+Then migrate consumers: change the template URL, regenerate, release per the
+checklist, and announce the new `from:` URL. Until then, the GitHub URL is
+the install URL of record.
+
+### Post-migration / pre-announcement check
+
+After any hosting or mirror change — and before any release announcement —
+prove the **documented** URL anonymously resolves the **latest** tag:
+
+```bash
+# 1. Anonymous readability of the canonical URL (expect 200; 401 = consumers broken now)
+curl -s -o /dev/null -w '%{http_code}\n' \
+  'https://github.com/jedarden/pdftract-swift/info/refs?service=git-upload-pack'
+
+# 2. Latest tag visible there, with the peeled commit matching local
+VER="$(cat .codegen-version)"
+git ls-remote --tags https://github.com/jedarden/pdftract-swift.git | grep "refs/tags/v${VER}"
+git rev-parse "v${VER}^{commit}"   # must equal the ^{} peeled SHA from the line above
+
+# 3. The documented requirement resolves against a visible tag
+grep -n 'from:' README.md          # README's from: must be <= the latest tag visible in step 2
+```
+
+Failures and what they mean: step 1 ≠ 200 → mirror visibility changed,
+consumers are broken now. Step 2 has no lines → the tag didn't reach the
+mirror; re-run step 3 of the checklist. Step 2 peeled SHA ≠ local → the
+mirror holds the tag on a stale commit; investigate before announcing.
+Step 3 `from:` greater than the latest visible tag → the README advertises a
+version no consumer can resolve; the drop or the tag didn't publish — do not
+announce.
+
 ## The version triple
 
 Three independently-stored artifacts must name the same `X.Y.Z`. Two of them
@@ -296,3 +376,8 @@ Breaking is a property of what shipped, not of what the diff removes.
 - **2026-11-25** — this runbook written from the two precedents; cascade
   Swift slot re-verified hard-off on declarative-config `origin/main`, with
   the four template defects listed above.
+- **2026-11-25** — canonical consumer URL decided (pdfswift-63bde4de): the
+  GitHub mirror URL is the install URL of record; Forgejo answers 401 to
+  anonymous reads and so cannot serve SwiftPM consumers. See "Canonical
+  consumer URL (decision)" — flip conditions and the post-migration check
+  live there.
