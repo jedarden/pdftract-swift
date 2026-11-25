@@ -88,6 +88,21 @@ filter is a declarative-config change (`pdftract-swift-build-workflowtemplate.ym
 and remains to be made there. Full unfiltered run *with* a real binary on
 PATH is still pdfswift-3307a377's verification.
 
+Status update 2026-11-25 (pdfswift-d971f54f): the "macOS 13+" in the
+platform claim above is **declared-but-untested**. Every verification path —
+the `pdftract-swift-build` and `pdftract-swift-publish` gates (both
+`swift:5.10-jammy`) and the docker recipe in `codegen-refresh.md` — proves
+Linux only, and there is no macOS host in the fleet to add coverage on.
+Worse than unverified: inspection of the never-compiled macOS branches found
+the binary-discovery PATH scan splits on `;` for non-Linux platforms
+(`Methods.swift:34` + mirrored test helper), which cannot find `pdftract` on
+a stock colon-separated macOS PATH — so default-init clients are believed
+broken on macOS outright. All affected sites are generated; the fix (and any
+README rewording) belongs in the upstream pdftract templates per the
+fix-upstream-first rule. Full analysis and the manual-macOS-host verification
+recipe: `docs/notes/codegen-refresh.md` → "Platform coverage: macOS 13+ is
+declared-but-untested".
+
 ## ADR-1: 2026-07-20 — CI-gated build/release pipeline for the generated Swift SDK, plus an interim naming-compatibility shim
 
 ### Context

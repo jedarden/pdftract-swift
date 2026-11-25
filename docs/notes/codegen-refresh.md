@@ -214,6 +214,65 @@ such a run can tell you. The one remaining binary-less failure set is
 pre-existing and unrelated to any drop: `ProcessLifecycleTests` fails 3/6 in
 docker-class containers (see the CI map above).
 
+## Platform coverage: macOS 13+ is declared-but-untested
+
+The README ("**Supported**: macOS 13+, Linux") and `Package.swift`
+(`platforms: [.macOS(.v13)]`) both declare macOS 13+, but **nothing in this
+repo's verification chain has ever compiled or run the package on macOS**.
+Every gate in the CI map above runs on `swift:5.10-jammy` — Linux — and the
+docker recipe under "Refresh procedure" is the same image. There is no macOS
+host in the fleet (iad-ci is a Linux cluster; Linux docker cannot run macOS
+images), so macOS coverage cannot be added to any existing gate. Read the
+README claim as a *declaration*, not a verified fact (pdfswift-d971f54f,
+2026-11-25).
+
+Inspection of the macOS branches the Linux gates never compile says the
+declaration is not merely unverified — the macOS path is believed broken for
+its primary use:
+
+- Four of the six `#if os(Linux)` sites are inert: both branches are the same
+  `import Foundation` (`Errors.swift:5`, `Types.swift:5`,
+  `Sources/Pdftract/Pdftract.swift:6`, `Methods.swift:5`).
+- The other two split the binary-discovery PATH scan on `;` for every
+  non-Linux platform (`Methods.swift:34`, mirrored by the `requireBinary()`
+  helper in `ConformanceTests.swift:29`). macOS, like Linux, separates PATH
+  entries with `:` — so on a stock macOS PATH (`/usr/local/bin:/usr/bin:/bin`)
+  the whole PATH is one split result and the scan probes
+  `/usr/local/bin:/usr/bin:/bin/pdftract`, a path that never exists. The scan
+  result is discarded (`resolvedBinaryPath ?? "pdftract"`), the client falls
+  back to the bare string `pdftract`, and every default-init call then fails
+  at spawn — binary-not-found. The fake/stub suites are unaffected (they pass
+  `binaryPath:` explicitly, bypassing discovery), which is exactly why the
+  Linux gates cannot catch this: they never exercise macOS discovery.
+
+All six sites, plus the README/platform wording, are generated output — the
+conditionals come from the upstream pdftract templates. Fixing the `;` split,
+or rewording the README claim, is a **template change upstream** (see "Fixing
+a bug in generated code" above), then a regeneration here; a hand-edit to
+`Methods.swift`, `ConformanceTests.swift`, or `README.md` is drift and gets
+reverted by the next refresh.
+
+### Manual macOS verification (when a macOS host is available)
+
+Until such a host exists, the claim stays declared-but-untested. When one is
+available, run on macOS 13+ with the Swift 5.10 toolchain and record the
+result like the CI proof beads do (commit SHA, exact commands, exit codes):
+
+```bash
+# fresh checkout or `git archive HEAD` extraction of the tagged release
+swift build && swift build --build-tests   # compile both targets
+swift test --filter 'StreamingStderrRegressionTests|ExitCodeMappingTests'
+# with a real pdftract release binary on PATH (expect this to be red until
+# the upstream `;`-split fix lands and a drop picks it up — discovery is the
+# known-broken path):
+swift test --filter ConformanceTests
+```
+
+The compile-level steps are expected to pass on macOS (nothing in them
+resolves PATH at compile time); the real-binary step is where the `;` split
+bites. A green macOS conformance run would falsify the analysis above and
+justify upgrading the README claim from declaration to verified support.
+
 ## Follow-up (optional, upstream)
 
 If this guide should be discoverable from `README.md`, add the link to
