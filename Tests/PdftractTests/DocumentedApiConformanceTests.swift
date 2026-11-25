@@ -841,8 +841,8 @@ final class DocumentedApiConformanceTests: XCTestCase {
 
         let argv = try Self.capturedArguments(from: fake.capturePath)
         XCTAssertEqual(
-            argv, ["grep", Self.markerPrefix, fixture.path],
-            "search() must invoke grep with the pattern before the fixture path"
+            argv, ["grep", "--", Self.markerPrefix, fixture.path],
+            "search() must invoke grep with the pattern after the -- separator, before the fixture path (pdfswift-4e62b1ac)"
         )
     }
 }

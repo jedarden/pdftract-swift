@@ -348,7 +348,7 @@ final class SourceBytesPassthroughTests: XCTestCase {
         )
         XCTAssertEqual(
             Array(textArgv.dropFirst(1)),
-            ["--text", "--json", "--"],
+            ["--text", "--json", "--", textSpill],
             "extractText() sent \(textArgv) — format flags belong before the -- separator, the spilled source path after it"
         )
         XCTAssertFalse(
@@ -365,7 +365,7 @@ final class SourceBytesPassthroughTests: XCTestCase {
         )
         XCTAssertEqual(
             Array(markdownArgv.dropFirst(1)),
-            ["--md", "--json", "--"],
+            ["--md", "--json", "--", markdownSpill],
             "extractMarkdown() sent \(markdownArgv) — format flags belong before the -- separator, the spilled source path after it"
         )
         XCTAssertFalse(

@@ -56,7 +56,7 @@ final class FlagLikeValuePassthroughTests: XCTestCase {
 
     /// Minimal `Document` JSON for the buffered extract tests to decode.
     private static let minimalDocumentJSON =
-        #"{"schema_version":"1.0","pages":[],"metadata":{"page_count":0}"#
+        #"{"schema_version":"1.0","pages":[],"metadata":{"page_count":0}}"#
 
     /// Minimal `Page` NDJSON line for the streaming extract test.
     private static let minimalPageNDJSON =
