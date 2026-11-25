@@ -115,6 +115,12 @@ for try await page in client.extractStream(.path("large.pdf")) {
 }
 ```
 
+`page.pageIndex` is a **zero-based** page index: the document's first page is
+page `0`, and the last page yielded is page `metadata.pageCount - 1`, where
+`metadata.pageCount` is the total page count from `getMetadata` (see
+[Get metadata](#get-metadata)). Human-readable page numbers are
+`page.pageIndex + 1`, as printed in the example.
+
 ### Search
 
 `search` returns an `AsyncThrowingStream<Match, Error>` and throws the same
