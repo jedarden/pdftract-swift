@@ -156,24 +156,20 @@ final class VersionStampConsistencyTests: XCTestCase {
         let raw = try readRepoFile(".codegen-version", file: file, line: line)
         let stamp = raw.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        func fail(_ message: String) throws -> Never {
-            XCTFail(message, file: file, line: line)
-            throw GateError.invalidStamp(stamp)
+        var problem: String? = nil
+        if stamp.isEmpty {
+            problem = ".codegen-version is empty — every drop must record the pdftract release it was emitted from (docs/notes/codegen-refresh.md)"
+        } else if stamp.hasPrefix("v") {
+            problem = ".codegen-version must be plain semver without a v prefix, got '\(stamp)' — tags carry the v (SwiftPM strips it), the provenance file never does"
+        } else if stamp.range(of: "^[0-9]+\\.[0-9]+\\.[0-9]+$", options: .regularExpression) == nil {
+            problem = ".codegen-version must be a full X.Y.Z semver literal, got '\(stamp)'"
+        } else if stamp == Self.generatorDefaultStamp {
+            problem = ".codegen-version is 0.1.0 — pdftract's own Cargo version, i.e. the documented default leaked by omitting --version on `sdk codegen`. Regenerate with --version <the pdftract release the drop came from> per docs/notes/codegen-refresh.md; if 0.1.0 ever becomes a genuine pdftract release, revisit generatorDefaultStamp in VersionStampConsistencyTests first"
         }
 
-        if stamp.isEmpty {
-            return try fail(".codegen-version is empty — every drop must record the pdftract release it was emitted from (docs/notes/codegen-refresh.md)")
-        }
-        if stamp.hasPrefix("v") {
-            return try fail(".codegen-version must be plain semver without a v prefix, got '\(stamp)' — tags carry the v (SwiftPM strips it), the provenance file never does")
-        }
-        if stamp.range(of: "^[0-9]+\\.[0-9]+\\.[0-9]+$", options: .regularExpression) == nil {
-            return try fail(".codegen-version must be a full X.Y.Z semver literal, got '\(stamp)'")
-        }
-        if stamp == Self.generatorDefaultStamp {
-            return try fail(".codegen-version is 0.1.0 — pdftract's own Cargo version, i.e. the documented default leaked by omitting --version on `sdk codegen`. Regenerate with --version <the pdftract release the drop came from> per docs/notes/codegen-refresh.md; if 0.1.0 ever becomes a genuine pdftract release, revisit generatorDefaultStamp in VersionStampConsistencyTests first")
-        }
-        return stamp
+        guard let problem = problem else { return stamp }
+        XCTFail(problem, file: file, line: line)
+        throw GateError.invalidStamp(stamp)
     }
 
     private func readRepoFile(
