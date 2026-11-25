@@ -63,6 +63,33 @@ let options = ExtractOptions(
 let doc = try await client.extract(.path("scanned.pdf"), options: options)
 ```
 
+The two OCR fields carry different contracts.
+
+`ocrLanguage` names the Tesseract language pack or packs the OCR engine
+loads, forwarded verbatim as one `--ocr-language` value. Codes follow
+Tesseract's pack naming — ISO 639-2/3 codes such as `"eng"`, `"fra"`,
+`"deu"`, `"spa"`, `"jpn"`, plus script-qualified names like `"chi_sim"`.
+Multiple languages go in one comma-separated string (`"eng,fra"`); the CLI
+splits on the commas and loads every named pack. Nothing is validated on the
+client side.
+
+A pack the running machine does not have is not an error: each missing code
+emits an `OCR_LANGUAGE_UNAVAILABLE` diagnostic and extraction continues with
+the packs that are installed; if none of the requested packs is installed,
+the CLI falls back to `"eng"`, and only when even that fallback is missing
+does extraction fail. Run `pdftract doctor tesseract-langs` to list what a
+machine can load — the published Docker images differ (`pdftract:default`
+bundles no packs, `pdftract:ocr` the common set, `pdftract:full` all 100+).
+
+`ocrThreshold` is a confidence floor in the range 0–1 (the SDK conformance
+spec pins `minimum: 0, maximum: 1`). The SDK clamps nothing: your value is
+forwarded verbatim as `--ocr-threshold <v>`, so an out-of-range value is
+never caught on the client side. No released pdftract binary accepts this
+flag yet — the released CLI rejects `--ocr-threshold` as an unexpected
+argument (exit 2) whatever the value — so the field currently expresses
+intent ahead of binary support, and passing it makes today's CLI reject the
+whole call.
+
 ### Extract text
 
 ```swift
@@ -385,8 +412,8 @@ The streaming methods are covered by the same contract: `extractStream` and
 
 ```swift
 let options = ExtractOptions(
-    ocrLanguage: "eng",           // ISO 639-3 language code
-    ocrThreshold: 0.7,            // OCR confidence threshold (0-1)
+    ocrLanguage: "eng",           // Tesseract language pack code (see "Extract with OCR")
+    ocrThreshold: 0.7,            // OCR confidence threshold, 0-1 (see "Extract with OCR")
     preserveLayout: false,        // Preserve original reading order
     extractImages: false,         // Extract embedded images
     imageFormat: "png",           // Format for images: png, jpg, webp
