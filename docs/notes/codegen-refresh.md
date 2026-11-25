@@ -166,12 +166,33 @@ Validate regenerates the skeleton into a temp dir and diffs it against
 
 - **The exit code is not the signal.** Validate exits 1 whenever *any* finding
   exists, including pure `EXTRA` noise — on this repo it therefore always
-  exits 1. Gate on the absence of `MODIFIED`/`MISSING` lines under generated
-  paths instead:
+  exits 1, even on a byte-perfect drop. It scans the whole `--sdk-dir`, so a
+  pristine `git archive` extraction (no `.git/`, no `.beads/`) still carries
+  the hand-written `docs/` tree — ~61 `EXTRA` lines on 2026-11-25, ~109 in a
+  full clone once `.git/` and `.beads/` add their own. Gate on the findings,
+  never the exit status, and always validate against the same checkout you
+  regenerated from (step 2 above — findings are relative to *that* checkout's
+  templates):
   ```bash
   pdftract sdk validate --lang swift --sdk-dir ~/pdftract-swift 2>&1 \
     | grep -E '^\s+(MODIFIED|MISSING)'
   ```
+  The only acceptable residue on a correct drop is the single
+  `MODIFIED: README.md` line described below; everything else the scan
+  prints is `EXTRA` noise. **So an exit 1 whose findings are exactly
+  `EXTRA` noise plus `MODIFIED: README.md` is a pass.** The
+  machine-evaluable form of that rule is the same grep with the README
+  artifact filtered out — empty output means the drop is correct, whatever
+  the exit code:
+  ```bash
+  pdftract sdk validate --lang swift --sdk-dir ~/pdftract-swift 2>&1 \
+    | grep -E '^[[:space:]]+(MODIFIED|MISSING)' \
+    | grep -vE '^[[:space:]]+MODIFIED: README\.md$'
+  ```
+  A `MODIFIED`/`MISSING` line on any other generated path (the content paths
+  are all `.swift` files) is the only actionable output — a hand-edit
+  (forbidden) or staleness against the generator checkout — never `EXTRA`
+  noise and never the exit code.
 - **`MODIFIED: README.md` is (mostly) benign.** Validate has no `--version`
   flag and always compares against a skeleton generated at the default
   `0.1.0`, so the install snippet and the "generated against pdftract"
@@ -229,6 +250,7 @@ history:
 | When | Workflow (iad-ci) | What it does |
 |---|---|---|
 | Every push to `main` | `pdftract-swift-build` | `swift build` + `swift build --build-tests` on `swift:5.10-jammy`, then `swift test --skip ProcessLifecycleTests` — the whole test target minus one suite. This is the expanded gate from declarative-config `b947d7a35` (live 2026-11-25): the old `--filter 'StreamingStderrRegressionTests\|ExitCodeMappingTests'` predates the pdfswift-8f868708 XCTSkip guards, which made the binary-dependent conformance suites skip cleanly and removed the reason for the filter. A regenerated drop that breaks either compile step, or regresses any surviving suite (stderr draining, exit-code mapping, argv/bytes passthrough, receipts), fails here. The `--skip` exists for a pre-existing, environment-specific reason: `ProcessLifecycleTests` fails 3/6 in docker-class containers (observed identically on the pre-guard tree, 2026-11-25 — cancel/timeout/drop-before-iteration; cancellation and timeouts don't reach the spawned child in that environment). Drop the `--skip` when pdfswift-b64f41eb lands. |
+| Planned | `codegen-drift-gate` step in `pdftract-swift-build` | **Implemented but not live.** The step exists on declarative-config branch `pdfswift-5efd262c/codegen-drift-gate` (tip `3490164b3`, pushed to Forgejo; branch is tracked by no ArgoCD app, so live CI is unaffected) and is deliberately **not** merged: it resolves the generator ref from `.codegen-version` (release v1.2.0 today), and against that reference the step would be permanently red — the tree's generated content is ahead of every ref a CI checkout can resolve (the provenance split tracked by pdfswift-4ea674f4), i.e. the "staleness looks like tampering" case above as a standing condition. The step is already scoped against the exit-code trap this page documents: validate runs from the generator checkout root (the CWD requirement), the script **ignores validate's exit status** and fails only on `MODIFIED`/`MISSING` findings after filtering all `EXTRA` noise and excluding exactly the benign `MODIFIED: README.md` artifact — so a clean repo passes — plus a byte-exact regenerate-and-diff over all nine generated paths that closes validate's two blind spots (README content drift, a `.codegen-version` that doesn't match the tree). Merge trigger: the swift-template lineage lands upstream and the drop is refreshed from the resulting release (pdfswift-5efd262c's recovery path). |
 | pdftract release `N` | `pdftract-swift-publish` (via `pdftract-release-cascade`) | **Not firing** — the cascade's `sdk-swift-publish` slot is hard-off (`when: 'false'`), so pdftract releases do **not** auto-tag this SDK; releases are cut manually per `docs/notes/sdk-release-runbook.md`. The template, if ever enabled as written, clones GitHub directly and tags `N` numerically — four defects to reconcile first, listed in the runbook. |
 
 Both templates live in `jedarden/declarative-config` under
