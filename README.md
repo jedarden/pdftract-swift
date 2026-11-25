@@ -219,6 +219,25 @@ for try await match in client.search(.path("document.pdf"), "invoice") {
 `Page.pageIndex` in `extractStream` — so the document's first page is page `0`.
 Human-readable page numbers are `match.page + 1`.
 
+`match.context.before` and `match.context.after` are the text surrounding the
+match, delivered **verbatim** from the binary's `context` fields: the SDK does
+not clip, trim, pad, or reassemble them, and it defines no character window of
+its own. How much surrounding text a binary returns — and where it truncates —
+is that binary's decision, not this SDK's, so treat the fields as display hints
+to print, not structured text to parse. Either field can be **empty**: the SDK
+does not constrain them, so a match with no text on one side (a page or line
+boundary, for instance) yields an empty string there whenever the binary
+reports it that way — handle both sides possibly being `""`. The example's
+`...\(before)[\(text)]\(after)...` framing already prints sensibly in that
+case, with nothing between the ellipsis and the brackets on the empty side.
+
+No released pdftract binary has a `grep` subcommand yet, so against today's
+releases `search` throws before yielding any match — the child exits with the
+clap usage error, which the SDK maps to `CorruptPdfError` (see
+[Binary version compatibility](#binary-version-compatibility)). The context
+semantics above are the decode contract this SDK pins; they take effect
+unchanged once a binary with a compatible `grep` exists.
+
 ### Flag-like paths and patterns
 
 Values the SDK hands to the pdftract CLI are never misparsed as CLI flags,
@@ -435,7 +454,7 @@ Returned by `search` — see [Search](#search) for usage.
 | `text` | `String` | The matched text |
 | `page` | `Int` | **Zero-based** page index of the page containing the match |
 | `bbox` | `[Double]` | Location of the match — same `[x0, y0, x1, y1]` convention as `Span` |
-| `context` | `Context` | Nested `Match.Context` with `before` and `after`: the text immediately surrounding the match |
+| `context` | `Context` | Nested `Match.Context` with `before` and `after`: the surrounding text as the binary emitted it — passed through verbatim, no fixed window, either side possibly empty (see [Search](#search)) |
 
 ### Fingerprint
 
