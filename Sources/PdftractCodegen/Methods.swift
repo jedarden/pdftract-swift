@@ -1314,11 +1314,14 @@ private final class Cleanup: @unchecked Sendable {
     }
 
     /// The sequence-deinit form: runs the action only when no iterator was
-    /// ever created — the sequence dropped before being iterated.
+    /// ever created — the sequence dropped before being iterated. A claimed
+    /// release (the normal for-loop handoff) must leave `done` untouched:
+    /// the iterator's `deinit` and the inner stream's `onTermination` still
+    /// own the once-token, and they fire after this deinit on every loop.
     func runOnceIfUnclaimed() {
         lock.lock()
         let first = !done && !claimed
-        done = true
+        if first { done = true }
         lock.unlock()
         if first { action() }
     }
