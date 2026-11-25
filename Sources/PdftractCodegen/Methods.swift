@@ -478,27 +478,34 @@ public struct Pdftract: Sendable {
     ///   - onSkippedLine: Called once per NDJSON line that failed to decode. Without
     ///     this the dropped line is lost silently — indistinguishable from a PDF that
     ///     simply had fewer pages. Default `nil`.
-    /// - Returns: An `AsyncThrowingStream` that yields `Page` values.
+    /// - Returns: A `PdftractStream` that yields `Page` values.
     /// - Throws: `PdftractError` if extraction fails.
     public func extractStream(
         _ source: Source,
         options: ExtractOptions = ExtractOptions(),
         onSkippedLine: (@Sendable (Error) -> Void)? = nil
-    ) -> AsyncThrowingStream<Page, Error> {
-        return AsyncThrowingStream { continuation in
-            // Lifecycle: a dropped or cancelled sequence must terminate the
-            // child (SIGTERM); reaping stays with the producer's post-EOF
-            // reap. The registration lives HERE, synchronously inside the
-            // build closure, for two platform-pinned reasons
+    ) -> PdftractStream<Page> {
+        let spawned = SpawnedProcess()
+        // One idempotent cleanup for every early exit: a cancelled consumer
+        // (the inner stream's onTermination), a `for`-loop break or any other
+        // early iterator release (`PdftractStream.AsyncIterator.deinit`), and
+        // a drop before iterating (`PdftractStream.deinit`) all funnel through
+        // this single terminate-only action — see `PdftractStream` for why
+        // deinit-driven cleanup is required on this Foundation.
+        let cleanup = Cleanup { spawned.terminate() }
+        let inner = AsyncThrowingStream<Page, Error> { continuation in
+            // Lifecycle: the inner stream's cancellation handler is
+            // registered HERE, synchronously inside the build closure, for
+            // two platform-pinned reasons
             // (swift:5.10-jammy, 2026-11-25, pdfswift-b64f41eb slice 2):
             //
             // 1. A registration made inside the producer Task can land AFTER
-            //    the sequence was already dropped: AsyncThrowingStream
+            //    the sequence was already cancelled or dropped: the stream
             //    ignores onTermination set on a terminated stream, so the
             //    child of a dropped-then-launched sequence had no reaper at
             //    all — the "dropped call leaves an orphaned pdftract
             //    process" failure mode, observed live. Registered here, the
-            //    handler is live before any drop can exist, and the launch
+            //    handler is live before any exit can exist, and the launch
             //    guard plus post-launch stop check below honor a termination
             //    that fired before the spawn.
             //
@@ -515,9 +522,8 @@ public struct Pdftract: Sendable {
             //    EOFs the producer's stdout read, and the post-EOF reap
             //    below takes the fast path that always works on this
             //    platform.
-            let spawned = SpawnedProcess()
             continuation.onTermination = { @Sendable _ in
-                spawned.terminate()
+                cleanup.run()
             }
             Task {
                 var args = ["extract", "--ndjson"]
@@ -602,15 +608,23 @@ public struct Pdftract: Sendable {
                     // Read lines incrementally. Loop to EOF rather than while
                     // `process.isRunning`: a child that exits between two reads
                     // can still leave buffered stdout behind, and EOF is the
-                    // only signal that stdout is fully drained. When the
-                    // sequence is dropped, onTermination's terminate() EOFs
-                    // this read — the drop cannot leave the producer wedged on
-                    // a pipe that never closes.
+                    // only signal that stdout is fully drained. `availableData`,
+                    // not `readData(ofLength:)`: on Linux, Foundation's
+                    // readData(ofLength:) loops until it has collected the full
+                    // byte count or hit EOF, so a child that writes a short
+                    // burst and then pauses wedged the producer in a read that
+                    // would not return until the child died — and a consumer
+                    // parked in next() starved with the lines sitting unread
+                    // in the pipe (observed live on swift:5.10-jammy,
+                    // 2026-11-25). availableData performs one read() and
+                    // returns whatever arrived. When the sequence is dropped
+                    // or abandoned, the cleanup's terminate() EOFs this read —
+                    // the exit cannot leave the producer wedged on a pipe
+                    // that never closes.
                     var buffer = [UInt8]()
-                    let readSize = 4096
 
                     while true {
-                        let data = outHandle.readData(ofLength: readSize)
+                        let data = outHandle.availableData
                         if data.isEmpty {
                             break
                         }
@@ -677,6 +691,7 @@ public struct Pdftract: Sendable {
                 }
             }
         }
+        return PdftractStream(inner: inner, cleanup: cleanup)
     }
 
     
@@ -690,47 +705,27 @@ public struct Pdftract: Sendable {
     ///   - onSkippedLine: Called once per NDJSON line that failed to decode. Without
     ///     this the dropped line is lost silently — indistinguishable from output that
     ///     simply had fewer matches. Default `nil`.
-    /// - Returns: An `AsyncThrowingStream` that yields `Match` values.
+    /// - Returns: A `PdftractStream` that yields `Match` values.
     /// - Throws: `PdftractError` if search fails.
     public func search(
         _ source: Source,
         _ pattern: String,
         options: SearchOptions = SearchOptions(),
         onSkippedLine: (@Sendable (Error) -> Void)? = nil
-    ) -> AsyncThrowingStream<Match, Error> {
-        return AsyncThrowingStream { continuation in
-            // Lifecycle: a dropped or cancelled sequence must terminate the
-            // child (SIGTERM); reaping stays with the producer's post-EOF
-            // reap. The registration lives HERE, synchronously inside the
-            // build closure, for two platform-pinned reasons
-            // (swift:5.10-jammy, 2026-11-25, pdfswift-b64f41eb slice 2):
-            //
-            // 1. A registration made inside the producer Task can land AFTER
-            //    the sequence was already dropped: AsyncThrowingStream
-            //    ignores onTermination set on a terminated stream, so the
-            //    child of a dropped-then-launched sequence had no reaper at
-            //    all — the "dropped call leaves an orphaned pdftract
-            //    process" failure mode, observed live. Registered here, the
-            //    handler is live before any drop can exist, and the launch
-            //    guard plus post-launch stop check below honor a termination
-            //    that fired before the spawn.
-            //
-            // 2. The handler must not reap. On this Foundation,
-            //    waitUntilExit() parked across the child's death never
-            //    receives the exit event (the same wedge the buffered exec
-            //    path documents above its drain-before-reap ordering), so a
-            //    reap here — running on the dropping/consumer thread while
-            //    the child is still alive — parked that thread forever (a
-            //    plain loop break wedged the consumer inside its own deinit)
-            //    and left Foundation's running flag set, trapping the next
-            //    process.terminationStatus read with an illegal instruction.
-            //    terminate() alone is a non-blocking kill: the child's death
-            //    EOFs the producer's stdout read, and the post-EOF reap
-            //    below takes the fast path that always works on this
-            //    platform.
-            let spawned = SpawnedProcess()
+    ) -> PdftractStream<Match> {
+        let spawned = SpawnedProcess()
+        // One idempotent cleanup for every early exit — see the note at the
+        // top of `extractStream` (or `PdftractStream` itself) for the three
+        // termination drivers and why they funnel through one flag.
+        let cleanup = Cleanup { spawned.terminate() }
+        let inner = AsyncThrowingStream<Match, Error> { continuation in
+            // Lifecycle: the inner stream's cancellation handler is
+            // registered HERE, synchronously inside the build closure, for
+            // two platform-pinned reasons — see the note at the top of
+            // `extractStream` (late registration was silently ignored by the
+            // stream; the handler must never reap on this Foundation).
             continuation.onTermination = { @Sendable _ in
-                spawned.terminate()
+                cleanup.run()
             }
             Task {
                 var args = ["grep"]
@@ -801,15 +796,23 @@ public struct Pdftract: Sendable {
                     // Read lines incrementally. Loop to EOF rather than while
                     // `process.isRunning`: a child that exits between two reads
                     // can still leave buffered stdout behind, and EOF is the
-                    // only signal that stdout is fully drained. When the
-                    // sequence is dropped, onTermination's terminate() EOFs
-                    // this read — the drop cannot leave the producer wedged on
-                    // a pipe that never closes.
+                    // only signal that stdout is fully drained. `availableData`,
+                    // not `readData(ofLength:)`: on Linux, Foundation's
+                    // readData(ofLength:) loops until it has collected the full
+                    // byte count or hit EOF, so a child that writes a short
+                    // burst and then pauses wedged the producer in a read that
+                    // would not return until the child died — and a consumer
+                    // parked in next() starved with the lines sitting unread
+                    // in the pipe (observed live on swift:5.10-jammy,
+                    // 2026-11-25). availableData performs one read() and
+                    // returns whatever arrived. When the sequence is dropped
+                    // or abandoned, the cleanup's terminate() EOFs this read —
+                    // the exit cannot leave the producer wedged on a pipe
+                    // that never closes.
                     var buffer = [UInt8]()
-                    let readSize = 4096
 
                     while true {
-                        let data = outHandle.readData(ofLength: readSize)
+                        let data = outHandle.availableData
                         if data.isEmpty {
                             break
                         }
@@ -876,6 +879,7 @@ public struct Pdftract: Sendable {
                 }
             }
         }
+        return PdftractStream(inner: inner, cleanup: cleanup)
     }
 
     
@@ -1161,5 +1165,97 @@ private final class SpawnedProcess: @unchecked Sendable {
         lock.unlock()
         guard let process, !alreadyReaped else { return }
         process.waitUntilExit()
+    }
+}
+
+
+/// The public sequence type returned by the streaming methods
+/// (`extractStream(_:)`, `search(_:_:options:onSkippedLine:)`): a thin class
+/// wrapper around an `AsyncThrowingStream` that owns the SDK's early-exit
+/// cleanup.
+///
+/// Why not return the `AsyncThrowingStream` directly: on this Foundation
+/// (swift:5.10-jammy, probed 2026-11-25, pdfswift-b64f41eb slice 2) its
+/// `onTermination` handler fires only for two exits — Task cancellation, and
+/// producer finish. Abandoning iteration any other way releases the stream
+/// without any callback, and the child keeps running orphaned. The two exits
+/// without a hook are exactly the documented usage: `break` out of a
+/// `for try await` loop (the README's early-drop contract), and dropping the
+/// sequence before consuming it. There is no way to observe them on the
+/// stream itself, because the producer task holds the continuation — and
+/// with it the stream's storage — alive for the child's whole lifetime, so
+/// no deinit-driven termination can ever fire on the storage.
+///
+/// This wrapper owns those exits as SDK code. Swift guarantees a `for` loop
+/// releases its iterator when the loop exits — by `break`, early return,
+/// thrown error, or completion — and this iterator is a class, so its
+/// `deinit` runs the cleanup right there. Dropping the sequence before ever
+/// iterating runs the same cleanup through the sequence's own `deinit`.
+/// Cancelling the consuming Task still goes through the inner stream's
+/// `onTermination`. All three paths funnel through one idempotent `Cleanup`
+/// (terminate-only; reaping stays with the producer's post-EOF `reap()` —
+/// see the lifecycle comments in the streaming methods), so whichever exit
+/// happens first terminates the child and the rest are no-ops.
+public final class PdftractStream<Element: Sendable>: AsyncSequence {
+    public typealias Element = Element
+
+    private let inner: AsyncThrowingStream<Element, Error>
+    private let cleanup: Cleanup
+
+    fileprivate init(
+        inner: AsyncThrowingStream<Element, Error>,
+        cleanup: Cleanup
+    ) {
+        self.inner = inner
+        self.cleanup = cleanup
+    }
+
+    deinit { cleanup.run() }
+
+    public func makeAsyncIterator() -> AsyncIterator {
+        return AsyncIterator(inner: inner.makeAsyncIterator(), cleanup: cleanup)
+    }
+
+    /// The iterator handed to `for try await` loops. A class, not a struct:
+    /// its `deinit` is the break-driven cleanup hook (see `PdftractStream`).
+    public final class AsyncIterator: AsyncIteratorProtocol {
+        private var inner: AsyncThrowingStream<Element, Error>.Iterator
+        private let cleanup: Cleanup
+
+        fileprivate init(
+            inner: AsyncThrowingStream<Element, Error>.Iterator,
+            cleanup: Cleanup
+        ) {
+            self.inner = inner
+            self.cleanup = cleanup
+        }
+
+        deinit { cleanup.run() }
+
+        public func next() async throws -> Element? {
+            return try await self.inner.next()
+        }
+    }
+}
+
+/// Runs its action exactly once, however many owners race to release it.
+/// Every early exit of a `PdftractStream` (iterator deinit, sequence deinit,
+/// inner `onTermination`) lands here; the child termination must happen
+/// once, and repeats must stay no-ops.
+private final class Cleanup: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    private let action: @Sendable () -> Void
+
+    init(_ action: @escaping @Sendable () -> Void) {
+        self.action = action
+    }
+
+    func run() {
+        lock.lock()
+        let first = !done
+        done = true
+        lock.unlock()
+        if first { action() }
     }
 }

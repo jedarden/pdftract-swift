@@ -12,11 +12,25 @@
 // — breaking out of the consuming loop, dropping it unconsumed, or cancelling
 // the consuming Task — must terminate the child (SIGTERM) and reap it, and
 // must never leave a caller suspended on a pipe that will not close. The
-// mechanism is the sequence's `onTermination`, which the generated producer
-// wires to `terminate()` + `reap()` before the child even launches (Methods.swift,
-// "Lifecycle: a dropped or cancelled sequence must terminate (SIGTERM) and
-// reap the child"), with a launch guard that never spawns a child for a
-// sequence that is already gone. Four properties are pinned:
+// mechanism is the returned `PdftractStream`'s single idempotent cleanup,
+// wired to `terminate()` before the child even launches, that all three
+// early exits funnel through: a `break` releases the for-loop's iterator and
+// the iterator's `deinit` runs the cleanup; dropping the sequence before
+// iterating runs it through the sequence's own `deinit`; cancelling the
+// consuming Task runs it through the inner stream's `onTermination` — all
+// registered in the generated producer before any exit can exist
+// (Methods.swift, `PdftractStream` and the streaming methods' lifecycle
+// comments), with a launch guard that never spawns a child for a sequence
+// that is already gone. Deinit-driven cleanup is not optional on this
+// Foundation: an `AsyncThrowingStream`'s onTermination answers only
+// cancellation and producer finish, and its producer task holds the
+// continuation — the stream's storage — alive for the child's whole
+// lifetime, so a plain `break` is unobservable on the stream itself (probed
+// 2026-11-25, pdfswift-b64f41eb slice 2). The streaming producer also reads
+// the child's stdout with `availableData`, not `readData(ofLength:)`, which
+// on Linux loops until the full byte count or EOF and wedged the producer —
+// and every consumer parked in `next()` behind it — on any output that
+// arrived in short bursts (probed the same day). Four properties are pinned:
 //
 // 1. Take-then-break. Iterating until N values have arrived and then breaking
 //    must end the still-sleeping child within a bounded deadline: the break
@@ -145,9 +159,10 @@ final class ProcessLifecycleEarlyDropTests: XCTestCase {
     /// `take` values have arrived, then breaks. The consuming Task must
     /// return promptly (the break is a clean end, not an error), the
     /// sleeping child must be terminated AND reaped, and the TERM marker
-    /// must prove the SDK's onTermination did it.
+    /// must prove the SDK's early-drop cleanup — fired by the for-loop's
+    /// iterator deinit — did it.
     private func assertBreakingOutReapsChild<Element: Sendable>(
-        _ makeStream: @escaping (Pdftract) -> AsyncThrowingStream<Element, Error>,
+        _ makeStream: @escaping (Pdftract) -> PdftractStream<Element>,
         stubMode: ProcessLifecycleHarness.StubMode,
         take: Int,
         label: String,
@@ -254,7 +269,7 @@ final class ProcessLifecycleEarlyDropTests: XCTestCase {
     /// child spawned for a sequence that is already gone has no reaper, and
     /// the watchdog fails the test instead of leaking an orphan.
     private func assertImmediateDropLeavesNoOrphan<Element: Sendable>(
-        _ makeStream: @escaping (Pdftract) -> AsyncThrowingStream<Element, Error>,
+        _ makeStream: @escaping (Pdftract) -> PdftractStream<Element>,
         stubMode: ProcessLifecycleHarness.StubMode,
         label: String,
         file: StaticString = #filePath,
@@ -264,8 +279,10 @@ final class ProcessLifecycleEarlyDropTests: XCTestCase {
         let client = Pdftract(binaryPath: stub.binaryPath)
 
         // Acquire and drop without consuming: the last reference dies here,
-        // firing onTermination — either synchronously on an already-finished
-        // continuation (the producer has not run yet) or on the live one.
+        // running the sequence-deinit cleanup — either before the producer
+        // task has run at all (the launch guard then sees stop-requested and
+        // never spawns) or while the child is already live (terminate, then
+        // the producer's post-EOF reap).
         do {
             _ = makeStream(client)
         }
@@ -406,12 +423,15 @@ final class ProcessLifecycleEarlyDropTests: XCTestCase {
     ///    more; when the implementation grows kill escalation, this
     ///    assertion fails and the pin and the README paragraph move together;
     /// 3. the dropping Task is freed immediately rather than wedged behind a
-    ///    child that refuses to die: the drop handler is a non-blocking
-    ///    terminate, and it returns `CancellationError` promptly. (A handler
-    ///    that reaped here instead parked `waitUntilExit()` forever on this
-    ///    platform and later crashed a `terminationStatus` read with an
-    ///    illegal instruction — this test failed exactly that way before the
-    ///    fix, so its green run is also the crash regression gate.)
+    ///    child that refuses to die: the cleanup is a non-blocking terminate,
+    ///    and the cancelled consumer's iteration ends promptly — a clean end
+    ///    (cancellation delivers nil from `next()`, ending the loop without
+    ///    an error) or a `CancellationError`, whichever ending this
+    ///    Foundation serves; both are accepted and neither may wedge. (A
+    ///    handler that reaped here instead parked `waitUntilExit()` forever
+    ///    on this platform and later crashed a `terminationStatus` read with
+    ///    an illegal instruction — this test failed exactly that way before
+    ///    the fix, so its green run is also the crash regression gate.)
     /// 4. once that child dies by other means, nothing is left behind: the
     ///    producer's stdout read EOFs and the post-EOF reap — the only
     ///    reaper, called after the exit it waits for — clears the child from
@@ -431,8 +451,12 @@ final class ProcessLifecycleEarlyDropTests: XCTestCase {
         let pid = try await ProcessLifecycleHarness.waitForSpawnedPid(stub)
 
         // Cancelling the consumer is one of the documented sequence endings:
-        // next() throws CancellationError, the iterator is dropped, and
-        // onTermination terminates (SIGTERM) without reaping.
+        // the inner stream's onTermination runs the cleanup — terminate
+        // (SIGTERM), never reap — and the cancelled iteration ends promptly.
+        // On this Foundation a cancelled next() delivers nil, so the loop
+        // ends cleanly; CancellationError is accepted as the other legal
+        // ending. The pinned property is the bounded return, not which shape
+        // it took.
         consumer.cancel()
 
         let outcome = await ProcessLifecycleHarness.awaitOutcome(of: consumer)
@@ -442,8 +466,9 @@ final class ProcessLifecycleEarlyDropTests: XCTestCase {
             )
         }
         XCTAssertTrue(
-            outcome.error is CancellationError,
-            "expected CancellationError from the cancelled consumer, got \(String(describing: outcome.error))"
+            outcome.error == nil || outcome.error is CancellationError,
+            "expected clean completion or CancellationError from the cancelled consumer, "
+                + "got \(String(describing: outcome.error))"
         )
 
         // The no-escalation window doubles as the marker's settling time: a

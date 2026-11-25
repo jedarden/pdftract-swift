@@ -241,7 +241,8 @@ let md = try await client.extractMarkdown(.path("document.pdf"))
 
 ### Stream extraction (for large PDFs)
 
-`extractStream` returns an `AsyncThrowingStream<Page, Error>`, so iterate it
+`extractStream` returns a `PdftractStream<Page>` — an `AsyncSequence` over
+the child's NDJSON output — so iterate it
 with `for try await` — extraction failures throw from the loop (see
 [Errors from the streaming methods](#errors-from-the-streaming-methods)):
 
@@ -259,8 +260,7 @@ page `0`, and the last page yielded is page `metadata.pageCount - 1`, where
 
 ### Search
 
-`search` returns an `AsyncThrowingStream<Match, Error>` and throws the same
-way:
+`search` returns a `PdftractStream<Match>` and throws the same way:
 
 ```swift
 for try await match in client.search(.path("document.pdf"), "invoice") {
@@ -740,7 +740,7 @@ multi-clause form.
 
 ### Errors from the streaming methods
 
-`extractStream` and `search` return `AsyncThrowingStream`s and throw the same
+`extractStream` and `search` return `PdftractStream`s and throw the same
 error types as the buffered methods — iterate them with `for try await`:
 
 ```swift
@@ -818,10 +818,11 @@ task.cancel()
 try await task.value // throws CancellationError; the child is already gone
 ```
 
-**Dropping a stream.** `extractStream` and `search` follow the same rule.
-Breaking out of the loop — or dropping the sequence without iterating it —
-terminates and reaps the child promptly. A sequence dropped before the child
-has even launched never spawns one:
+**Dropping a stream.** `extractStream` and `search` return a `PdftractStream`,
+whose every early exit terminates and reaps the child promptly: breaking out
+of the loop, dropping the sequence without iterating it, or cancelling the
+consuming `Task` — each one triggers the same cleanup, however the iteration
+ends. A sequence dropped before the child has even launched never spawns one:
 
 ```swift
 for try await page in client.extractStream(.path("huge.pdf")) {

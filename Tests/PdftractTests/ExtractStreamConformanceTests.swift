@@ -147,7 +147,7 @@ final class ExtractStreamConformanceTests: XCTestCase {
 
     /// Consumes `stream` to completion, returning the pages in arrival order
     /// (or rethrowing the stream's terminal error).
-    private static func drain(_ stream: AsyncThrowingStream<Page, Error>) async throws -> [Page] {
+    private static func drain(_ stream: PdftractStream<Page>) async throws -> [Page] {
         var pages: [Page] = []
         for try await page in stream {
             pages.append(page)

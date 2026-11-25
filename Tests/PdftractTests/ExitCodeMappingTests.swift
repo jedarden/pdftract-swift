@@ -150,7 +150,7 @@ final class ExitCodeMappingTests: XCTestCase {
     /// which cannot happen for a stub that exits immediately but would surface
     /// the suite timeout rather than a wedge).
     private func terminalError<T>(
-        _ makeStream: () -> AsyncThrowingStream<T, Error>,
+        _ makeStream: () -> PdftractStream<T>,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async -> Error? {

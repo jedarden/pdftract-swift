@@ -220,7 +220,7 @@ final class BinaryPathOverrideTests: XCTestCase {
     /// happened: the yielded count and the error (nil if the iteration
     /// finished normally).
     private func runStream<C: Sendable>(
-        _ makeStream: (Pdftract) -> AsyncThrowingStream<C, Error>
+        _ makeStream: (Pdftract) -> PdftractStream<C>
     ) async -> (yielded: Int, thrown: Error?) {
         let client = Pdftract(binaryPath: "/nonexistent/pdftract-\(UUID().uuidString)")
         var count = 0

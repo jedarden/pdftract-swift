@@ -239,7 +239,7 @@ final class DocumentedApiConformanceTests: XCTestCase {
     /// child must not have failed" assertion for the pins that expect a
     /// clean exit). Generic over the element type so it serves both stream
     /// flavors this file drives: `Page` (extractStream) and `Match` (search).
-    private static func drain<T>(_ stream: AsyncThrowingStream<T, Error>) async throws -> [T] {
+    private static func drain<T>(_ stream: PdftractStream<T>) async throws -> [T] {
         var values: [T] = []
         for try await value in stream {
             values.append(value)

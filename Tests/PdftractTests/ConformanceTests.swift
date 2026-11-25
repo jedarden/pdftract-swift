@@ -349,7 +349,7 @@ final class StreamingStderrRegressionTests: XCTestCase {
     /// the consumer runs detached (a deadlocked one can be neither joined nor
     /// cancelled) and the watchdog kills the fake child before returning.
     private static func drain<T>(
-        _ makeStream: @escaping () -> AsyncThrowingStream<T, Error>,
+        _ makeStream: @escaping () -> PdftractStream<T>,
         killChild: @escaping @Sendable () -> Void
     ) async -> DrainOutcome {
         let box = DrainBox()
@@ -529,14 +529,22 @@ final class StreamingStderrRegressionTests: XCTestCase {
 ///   fast path that always returns promptly. This is why the SDK's buffered
 ///   exec awaits both pipe drains (EOF = the child is gone) BEFORE reaping,
 ///   and why every fake in this suite leaves no orphan behind.
-/// - Dropping an `AsyncThrowingStream`'s iterator while its producer still
-///   holds the continuation does not fire `onTermination` on this
-///   Foundation — it fires only when the producer finishes. The drop tests
-///   therefore pin the platform-independent safety properties (caller
-///   unblocked; child leaves the process table) with a short-sleep fake and
-///   assert no SIGTERM marker either way; the marker teeth live on the
-///   cancellation and timeout tests, whose triggers are reliable on every
-///   platform.
+/// - Abandoning a streaming sequence — a `for`-loop `break`, or dropping it
+///   before iterating — cannot be observed on the inner
+///   `AsyncThrowingStream` at all: its producer task holds the continuation
+///   (and so the stream's storage) alive for the child's whole lifetime, so
+///   no deinit-driven termination can fire on it, and its `onTermination`
+///   answers only cancellation and producer finish. The SDK therefore
+///   returns `PdftractStream`, a class wrapper whose iterator and sequence
+///   `deinit`s run the cleanup themselves (see `PdftractStream`) — break and
+///   drop terminate the child through SDK-owned deinit code, cancellation
+///   through the inner stream's `onTermination`. The drop tests assert the
+///   properties that hold under either mechanism (caller unblocked; child
+///   leaves the process table) with a short-sleep fake, and no SIGTERM
+///   marker either way — on a platform where the deinit cleanup is not
+///   reached the child's short natural exit still empties the table; the
+///   marker teeth live on the cancellation and timeout tests, whose
+///   triggers are reliable on every platform.
 ///
 /// Each cancellation/timeout test drives a fake `pdftract` — a shell
 /// script, so the process the SDK spawns (and the pidfile's `$$` records)
@@ -886,16 +894,14 @@ final class ProcessLifecycleTests: XCTestCase {
     /// hold on every platform. The fake sleeps only 2s, so a child the SDK
     /// could not terminate still exits naturally (and is reaped by the
     /// producer's EOF-then-reap path) well inside the watchdog: on
-    /// swift:5.10-jammy corelibs-foundation does not fire
-    /// `AsyncThrowingStream`'s `onTermination` when the consumer merely drops
-    /// the iterator while the producer still holds the continuation (probe
-    /// verified 2026-11-25, pdfswift-b64f41eb — it fires only when the
-    /// producer finishes), so the drop cannot SIGTERM the child there; on
-    /// platforms where the drop does fire it, the child dies even faster.
-    /// Both satisfy these assertions, which is why no SIGTERM marker is
-    /// asserted either way — pinning the marker would fail the test on one
-    /// platform class or the other. The marker teeth live on the
-    /// cancellation and timeout tests, whose triggers are reliable.
+    /// the child is terminated by the `PdftractStream` iterator's deinit
+    /// (SDK code — see `PdftractStream` for why the cleanup cannot live on
+    /// the inner `AsyncThrowingStream`: its producer task holds the
+    /// continuation alive for the child's whole lifetime, so no
+    /// deinit-driven termination can fire on it). The child's death EOFs the
+    /// producer, whose post-EOF reap empties the process table. No SIGTERM
+    /// marker is asserted here — the marker teeth live on the cancellation
+    /// and timeout tests, whose triggers are reliable on every platform.
     func testDroppedExtractStreamLeavesNoChildBehind() async throws {
         // One page, then the child holds stdout open briefly — the consumer
         // drops the sequence while the child is still live.
@@ -945,12 +951,12 @@ final class ProcessLifecycleTests: XCTestCase {
     /// process table. (Asserting "no spawn" unconditionally was racy on
     /// multi-core containers and failed even when the SDK had correctly
     /// killed and reaped the raced launch, observed 2026-11-25.) The 2s fake
-    /// keeps even the raced-launch interleaving inside the watchdog: on
-    /// swift:5.10-jammy the drop does not fire `onTermination` at all (see
-    /// the dropped-stream tests above), so the raced child exits naturally
-    /// and is reaped by the producer's EOF-then-reap path; where the drop
-    /// does fire, it is terminated sooner. No SIGTERM marker is asserted
-    /// either way — same rationale as the dropped-stream tests.
+    /// keeps even the raced-launch interleaving inside the watchdog: the
+    /// drop runs the `PdftractStream` sequence-deinit cleanup (see
+    /// `PdftractStream`), which terminates a child that did launch; the
+    /// producer's post-EOF reap then empties the process table. No SIGTERM
+    /// marker is asserted here — same rationale as the dropped-stream
+    /// tests.
     func testExtractStreamDroppedBeforeIterationLeavesNoChild() async throws {
         let fake = try Self.writeFakeBinary(stdoutLines: [], sleepSeconds: 2, endsBy: .naturalExit)
         defer { Self.dispose(fake) }
@@ -960,7 +966,7 @@ final class ProcessLifecycleTests: XCTestCase {
         // Optional so the `= nil` below compiles: assigning nil is the drop,
         // and it releases the sequence right here, synchronously registering
         // termination before any await.
-        var stream: AsyncThrowingStream<Page, Error>? = client.extractStream(.path("/does/not/matter.pdf"))
+        var stream: PdftractStream<Page>? = client.extractStream(.path("/does/not/matter.pdf"))
         stream = nil
 
         // Give any late spawn ample time to show up.
