@@ -43,12 +43,57 @@ The generator emits exactly nine paths — nothing else is touched:
 | `GENERATED` | marker |
 | `.codegen-version` | provenance stamp |
 
-Everything else in the repo (`docs/`, `notes/`, `LICENSE`, `.gitignore`,
-this file) is hand-written and survives regeneration untouched — verified:
+Everything else in the repo (`docs/`, `notes/`, `LICENSE`, `.gitignore`, this
+file) is hand-written and survives regeneration untouched — verified:
 codegen pointed at a populated repo root only rewrites the nine paths above.
-Note that `README.md` and `Package.swift` are generated too, even though they
-read like prose/config: **hand-edits to them are drift and get reverted by the
-next refresh.**
+That "everything else" explicitly includes the hand-written test suites
+sitting in `Tests/PdftractTests/` next to the generated one — see the next
+section. Note that `README.md` and `Package.swift` are generated too, even
+though they read like prose/config: **hand-edits to them are drift and get
+reverted by the next refresh.**
+
+### Hand-written test files live beside the generated suite
+
+`ConformanceTests.swift` is the only file codegen writes under `Tests/`, and
+it is not where this repo's regression coverage lives. The rest of the
+directory is hand-written and survives every refresh — only the nine paths
+above are ever rewritten:
+
+- The regression and contract suites are hand-written siblings:
+  `ExtractStreamConformanceTests.swift`, `ExitCodeMappingTests.swift`,
+  `DocumentedApiConformanceTests.swift`, `BinaryPathOverrideTests.swift`,
+  `VersionStampConsistencyTests.swift`, and the passthrough suites. Each is
+  its own file; a refresh rewrites none of them. (This is what the survival
+  list above predates — the list was written before these tests existed and
+  named only `docs/`, `LICENSE`, `.gitignore`.)
+- The generator never deletes a file it does not emit, so a new test suite
+  can be added here freely as a new hand-written file. SwiftPM's default
+  `.testTarget` in `Package.swift` compiles every `.swift` under
+  `Tests/PdftractTests/`, so the new file joins the same `swift test` gate
+  CI runs (CI map below) with no manifest or CI change.
+- In `sdk validate` these files surface as `EXTRA` findings — the benign
+  kind, same as `docs/`.
+
+The one hard rule that follows: **test code must never be merged into
+`ConformanceTests.swift`** (or any other generated file). A suite merged
+into the generated file compiles and passes — until the next refresh
+silently clobbers it. Regeneration rewrites the file from the template, the
+merged tests vanish, and the gate stays green, because absent tests fail
+nothing: the gate is now the whole target minus `ProcessLifecycleTests`
+(`swift test --skip ProcessLifecycleTests`, CI map below), which has no
+notion of a suite that used to exist. Nothing detects the loss. (While the
+merge exists, validate does flag it as
+`MODIFIED: Tests/PdftractTests/ConformanceTests.swift` drift — but validate
+runs at refresh time, exactly when the clobber lands, so it never stands
+between the merge and its loss.)
+
+If a regression test belongs in a suite the template itself owns —
+`StreamingStderrRegressionTests` and `ProcessLifecycleTests` live inside
+`ConformanceTests.swift` as genuine template output, which is why refreshes
+keep them — the fix goes in the upstream template first (see "Fixing a bug
+in generated code" below), then a regeneration carries it here, exactly as
+pdfswift-6bc41168 did for the stderr-drain regression. Never merge it in
+locally.
 
 ## Refresh procedure
 
