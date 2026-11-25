@@ -167,8 +167,16 @@ from anywhere else codegen fails with
 cd ~/pdftract && git checkout <ref> && cargo build --release
 export PATH="$HOME/pdftract/target/release:$PATH"
 
-# 2. Regenerate straight into this repo. --version is the pdftract release
-#    the drop comes from (see ".codegen-version" below).
+# 2. Guard, then regenerate straight into this repo. --version is the
+#    pdftract release the drop comes from (see ".codegen-version" below).
+#    The guard first (see the subsections below for why it exists and why
+#    it is shaped like this): codegen overwrites the nine generated paths
+#    in place, so every one of them must be clean before the run. If the
+#    check prints anything, STOP — do not run codegen in place. Commit or
+#    stash the edits if they are yours, or use the scratch-dir flow in
+#    the second subsection if they are someone else's WIP.
+gen_paths="Sources/PdftractCodegen/Types.swift Sources/PdftractCodegen/Methods.swift Sources/PdftractCodegen/Errors.swift Sources/Pdftract/Pdftract.swift Tests/PdftractTests/ConformanceTests.swift README.md Package.swift GENERATED .codegen-version"
+git -C ~/pdftract-swift status --porcelain -- $gen_paths   # must print NOTHING
 cd ~/pdftract
 pdftract sdk codegen --lang swift --version <X.Y.Z> --out ~/pdftract-swift
 
@@ -193,6 +201,78 @@ docker run --rm -v "$PWD:/workspace" -w /workspace swift:5.10-jammy \
 
 # 5. Commit the regenerated drop and the .codegen-version bump together.
 ```
+
+### Why step 2's guard exists, and how it is scoped
+
+`pdftract sdk codegen --out ~/pdftract-swift` rewrites the nine generated
+paths in place, before anyone reviews anything. Step 3's "review the diff"
+runs *after* the write and diffs the refreshed tree against generator
+output — it can no longer show what the tree used to contain. An
+uncommitted edit sitting on a generated path is therefore destroyed before
+it is ever reviewed, and how recoverable that was depends on how committed
+it was: content in a commit is recoverable from git, content only staged is
+recoverable from the index blob until the index moves, and content that
+lived only in the working tree is gone — no ref, no stash, nothing points
+at it. Detection downstream of the overwrite is equally absent: `sdk
+validate` compares the tree against generator output, not against what the
+tree used to say, and the CI drift gate is not live (CI map above), so
+nothing ever flags the loss.
+
+The hazard is not hypothetical. The guard was added on 2026-11-25 with the
+checkout carrying exactly such edits: the unlanded `--`-separator drop sat
+as uncommitted modifications on `Methods.swift` (54 changed lines) and
+`Types.swift` — two of the nine paths step 2 rewrites. One in-place
+refresh run at that moment would have deleted the work before review.
+
+Two deliberate scoping decisions:
+
+- **Nine paths, not the whole tree.** A whole-tree precondition can never
+  pass in this shared checkout: the checkpoint automation stages `.beads/`
+  shard deltas continuously and `.needle*` state changes underneath it.
+  Tree-wide dirt is normal fleet state and harmless; the only dirt this
+  procedure can never tolerate is dirt *on the paths the regenerator
+  overwrites* — which is exactly what the scoped check asks.
+- **`git status --porcelain`, not `git diff --quiet`.** The diff form
+  compares worktree to index only, so a staged-but-uncommitted edit passes
+  it — and this checkout's index is shared state that other workers and
+  the checkpoint automation write to. Status additionally reports
+  deletions and an untracked file occupying a generated path (e.g. a path
+  removed from the index but left on disk), which codegen would clobber or
+  confuse all the same.
+
+### When the guard trips: regenerate into a scratch dir, copy reviewed deltas
+
+Committing or stashing the blocking edits is often not an option — in this
+checkout, in-flight work usually belongs to another worker and must be
+preserved untouched. The alternative never overwrites anything you did not
+explicitly copy, so it is safe with concurrent WIP anywhere in the tree:
+
+```bash
+SCRATCH=$(mktemp -d)
+cd ~/pdftract
+pdftract sdk codegen --lang swift --version <X.Y.Z> --out "$SCRATCH"
+
+# Review: diff every generated path, live tree vs fresh output. diff
+# exits nonzero per differing path and prints nothing for identical ones
+# — a nonzero exit from the loop IS the signal, not an error to swallow.
+for p in Sources/PdftractCodegen/Types.swift Sources/PdftractCodegen/Methods.swift \
+         Sources/PdftractCodegen/Errors.swift Sources/Pdftract/Pdftract.swift \
+         Tests/PdftractTests/ConformanceTests.swift README.md Package.swift \
+         GENERATED .codegen-version
+do diff -u ~/pdftract-swift/"$p" "$SCRATCH/$p"
+done
+
+# Apply: copy across only the deltas you have actually reviewed, file by
+# file. Each cp is itself the reviewable `git diff` — and the pre-copy
+# content is still in HEAD at that point, so the review in step 3 now has
+# a recoverable "before" side.
+cp "$SCRATCH/Sources/PdftractCodegen/Methods.swift" \
+   ~/pdftract-swift/Sources/PdftractCodegen/Methods.swift
+```
+
+Validation and build verification (steps 3–4) run exactly as written once
+the reviewed deltas are in the live tree — `validate` still takes
+`--sdk-dir ~/pdftract-swift` — and step 5 commits the drop as usual.
 
 **Always pass `--version` explicitly.** The flag defaults to pdftract's own
 Cargo version (`0.1.0`), which would stamp a wrong `.codegen-version`, a wrong
