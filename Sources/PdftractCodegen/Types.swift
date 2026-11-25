@@ -10,7 +10,10 @@ import Foundation
 
 /// Source type for PDF input.
 /// Represents a local file path, a remote URL, or raw bytes.
-public enum Source {
+///
+/// `Sendable`: every payload (`String`, `URL`, `Data`) is itself Sendable, so
+/// a source can be built on one task and passed to a call running on another.
+public enum Source: Sendable {
     case path(String)
     case url(URL)
     case bytes(Data)

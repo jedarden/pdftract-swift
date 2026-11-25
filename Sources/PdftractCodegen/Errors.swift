@@ -15,7 +15,14 @@ import Foundation
 /// declared to return it, so concrete errors like `CorruptPdfError` must be
 /// subtypes — Swift structs cannot inherit. Callers rethrow through
 /// `catch let error as PdftractError`, which only matches subtypes.
-public class PdftractError: Error, LocalizedError {
+///
+/// `@unchecked Sendable`: a non-final class cannot carry the compiler-checked
+/// conformance, but the check it replaces holds by construction — both stored
+/// properties are immutable (`let`) `Sendable` values, the class exposes no
+/// mutators, and every subclass is `final` and adds no stored state of its
+/// own, so instances are effectively immutable. Errors thrown out of `async`
+/// calls can therefore cross actor and Task boundaries freely.
+public class PdftractError: Error, LocalizedError, @unchecked Sendable {
     public let message: String
     public let exitCode: Int
 
@@ -43,7 +50,10 @@ public class PdftractError: Error, LocalizedError {
 /// from a PDF that genuinely produced fewer results. `skippedCount` is the
 /// number of undecodable lines that were dropped (a truncated write, a CLI bug,
 /// or a schema drift between the CLI and this SDK's model are the usual causes).
-public struct MalformedStreamError: Error, LocalizedError {
+///
+/// `Sendable`: immutable (`let`) value members only, so the error can cross
+/// concurrency domains with the stream that produced it.
+public struct MalformedStreamError: Error, LocalizedError, Sendable {
     public let message: String
     public let skippedCount: Int
 

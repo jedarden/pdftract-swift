@@ -7,14 +7,16 @@ generator" half of that instruction. This guide is **hand-written** and lives
 under `docs/notes/` precisely because it is not generator output and must
 survive every refresh.
 
-Last verified against pdftract main (`5dcc52ec`, pdfswift-e7f9930c's
-verify-receipt contract docs — README/Types/Methods template edits plus the
-sdk-contract verify_receipt block, on the still-unlanded local main above
-`ab720d47` + `a2ed4c967` + `12c63b65`) on 2026-11-24: a fresh
-`pdftract sdk codegen --lang swift --version 1.2.0` reproduces all nine
-generated paths in this repo byte-for-byte, and `sdk validate` reports no
-`MODIFIED`/`MISSING` under any generated path (only the usual README
-0.1.0-comparison artifact).
+Last verified against pdftract main (`ae0a158d`, pdfswift-215641c8's
+Sendable/concurrency-safety drop — README/Types/Methods/Errors template
+edits plus the sdk-contract client-shareability block, on the still-unlanded
+local main above `5dcc52ec` + `ab720d47` + `a2ed4c967` + `12c63b65`) on
+2026-11-25: a fresh `pdftract sdk codegen --lang swift --version 1.2.0`
+reproduces all nine generated paths in this repo byte-for-byte, and
+`sdk validate` reports no `MODIFIED`/`MISSING` under any generated path (only
+the usual README 0.1.0-comparison artifact). The drop compiles on
+swift:5.10-jammy and the full test target minus `ProcessLifecycleTests`
+passes (34 tests, 0 failures, 6 binary-dependent skips).
 
 ## Where the generated output comes from
 
@@ -194,12 +196,21 @@ history:
   local main — the unlanded lineage this repo's drops come from, same
   standing as the `a2ed4c967` lifecycle-test fix — and regenerated here as a
   delta confined to `Tests/PdftractTests/ConformanceTests.swift`.
+- `pdfswift-215641c8` (2026-11-25): Sendable/concurrency-safety semantics —
+  the client struct and `Source` enum take checked `Sendable` conformances,
+  the non-final `PdftractError` base carries `@unchecked Sendable` (sound:
+  immutable `let` state, every subclass `final` and stateless),
+  `MalformedStreamError` takes the checked conformance, and the README gains
+  a "Concurrency" section stating the shareability contract. Fixed in the
+  Swift templates plus `sdk-contract.md` ("Client shareability") on pdftract
+  local main `ae0a158d` and regenerated here as a delta confined to
+  `README.md`, `Sources/PdftractCodegen/{Methods,Types,Errors}.swift`.
 
 ## What runs where (CI map)
 
 | When | Workflow (iad-ci) | What it does |
 |---|---|---|
-| Every push to `main` | `pdftract-swift-build` | `swift build` + `swift build --build-tests` on `swift:5.10-jammy`, then `swift test --filter 'StreamingStderrRegressionTests\|ExitCodeMappingTests'` (the two fake-binary suites). A regenerated drop that breaks either target, or regresses stderr draining or exit-code mapping, fails here. The filter predates the pdfswift-8f868708 XCTSkip guards, which removed the conformance-suite reason for it: binary-less, `ExtractStreamConformanceTests` now skips cleanly and could be safely added to the gate. A wholesale drop is still blocked, but for a different pre-existing reason: `ProcessLifecycleTests` fails 3/6 in docker-class containers (observed identically on the pre-guard tree, 2026-11-25 — cancel/timeout/drop-before-iteration; cancellation and timeouts don't reach the spawned child in that environment), and adding it would turn this gate red. Investigating that is its own piece of work; loosening the filter is a declarative-config change to `pdftract-swift-build-workflowtemplate.yml`. |
+| Every push to `main` | `pdftract-swift-build` | `swift build` + `swift build --build-tests` on `swift:5.10-jammy`, then `swift test --skip ProcessLifecycleTests` — the whole test target minus one suite. This is the expanded gate from declarative-config `b947d7a35` (live 2026-11-25): the old `--filter 'StreamingStderrRegressionTests\|ExitCodeMappingTests'` predates the pdfswift-8f868708 XCTSkip guards, which made the binary-dependent conformance suites skip cleanly and removed the reason for the filter. A regenerated drop that breaks either compile step, or regresses any surviving suite (stderr draining, exit-code mapping, argv/bytes passthrough, receipts), fails here. The `--skip` exists for a pre-existing, environment-specific reason: `ProcessLifecycleTests` fails 3/6 in docker-class containers (observed identically on the pre-guard tree, 2026-11-25 — cancel/timeout/drop-before-iteration; cancellation and timeouts don't reach the spawned child in that environment). Drop the `--skip` when pdfswift-b64f41eb lands. |
 | pdftract release `N` | `pdftract-swift-publish` (via `pdftract-release-cascade`) | **Not firing** — the cascade's `sdk-swift-publish` slot is hard-off (`when: 'false'`), so pdftract releases do **not** auto-tag this SDK; releases are cut manually per `docs/notes/sdk-release-runbook.md`. The template, if ever enabled as written, clones GitHub directly and tags `N` numerically — four defects to reconcile first, listed in the runbook. |
 
 Both templates live in `jedarden/declarative-config` under
@@ -268,7 +279,7 @@ result like the CI proof beads do (commit SHA, exact commands, exit codes):
 ```bash
 # fresh checkout or `git archive HEAD` extraction of the tagged release
 swift build && swift build --build-tests   # compile both targets
-swift test --filter 'StreamingStderrRegressionTests|ExitCodeMappingTests'
+swift test --skip ProcessLifecycleTests    # the same expanded gate CI runs
 # with a real pdftract release binary on PATH (expect this to be red until
 # the upstream `;`-split fix lands and a drop picks it up — discovery is the
 # known-broken path):

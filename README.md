@@ -271,6 +271,54 @@ try await Task.sleep(for: .seconds(30))
 task.cancel() // child terminated and reaped if still running
 ```
 
+## Concurrency
+
+A single `Pdftract` instance may be shared across concurrency domains. The
+client is a `Sendable` value type, so you can hold it in an actor, capture it
+in `@Sendable` closures, and call it from any number of Tasks at once:
+
+```swift
+let client = Pdftract() // one shared instance — or one per actor, both fine
+
+let total = try await withThrowingTaskGroup(of: Int.self) { group in
+    for path in paths {
+        group.addTask { try await client.extract(.path(path)).pages.count }
+    }
+    return try await group.reduce(0, +)
+}
+```
+
+What makes that safe:
+
+- **No per-instance mutable state.** The client stores only an immutable
+  `binaryPath`. Everything a call needs — the child process, its pipes, its
+  timeout and cancellation bookkeeping — is created inside that call and never
+  shared with any other.
+- **Concurrent calls are independent.** Each call spawns its own `pdftract`
+  child; there is no ordering between concurrent calls beyond each child's own
+  completion order, and per-call `timeout:` and `Task` cancellation affect only
+  that call's child.
+- **The one shared cache is thread-safe.** The PATH scan that resolves the
+  `pdftract` binary runs at most once per process and is memoized in a
+  `static let`, whose initializer Swift runs atomically and exactly once.
+
+Everything the SDK hands back crosses concurrency domains just as freely —
+models, options, and errors are all `Sendable`:
+
+| Type | Notes |
+|---|---|
+| `Document`, `Page`, `Span`, `Block` | Decoded results |
+| `Metadata`, `Match`, `Fingerprint`, `Classification` | Decoded results |
+| `Receipt`, `ReceiptVerificationResult` | Decoded results |
+| `Source`, `ExtractOptions`, `SearchOptions`, `BaseOptions`, `HashOptions` | Inputs |
+| `PdftractError` and every subclass, `TimeoutError`, `MalformedStreamError` | Thrown errors |
+
+The streaming methods are covered by the same contract: `extractStream` and
+`search` yield `Sendable` values, and their `onSkippedLine` callback is typed
+`@Sendable`, so a stream can be consumed on any task. Streams take no
+`timeout:` — for a deadline, cancel the consuming `Task`
+(see [Cancellation and timeouts](#cancellation-and-timeouts)).
+
 ## Options
 
 ### ExtractOptions

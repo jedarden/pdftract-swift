@@ -10,7 +10,18 @@ import Foundation
 
 /// Main Pdftract client for extracting data from PDFs.
 /// Uses the bundled pdftract binary via Process spawning.
-public struct Pdftract {
+///
+/// `Sendable` value type: a single instance may be shared across concurrency
+/// domains (held by an actor, captured in concurrent Tasks, copied freely).
+/// The struct's only stored property is an immutable `binaryPath`, and every
+/// call builds its working state locally — its own child process, pipes, and
+/// timeout/cancellation bookkeeping — so concurrent calls are fully
+/// independent. The one shared piece, the PATH scan cached in
+/// `resolvedBinaryPath`, runs at most once per process behind a thread-safe
+/// `static let` initializer. No locks to configure, no shared mutable state,
+/// and no ordering between concurrent calls beyond each child's own
+/// completion order.
+public struct Pdftract: Sendable {
     private let binaryPath: String
 
     /// Creates a new Pdftract client.
