@@ -79,14 +79,21 @@
 // fixture), so the source-case pins assert only what the release binary is
 // known to do.
 //
-// One test here is deliberately NOT gated that way:
+// Three tests here are deliberately NOT gated that way:
 // testSearchYieldsMatchesWithDocumentedPageAndContextFields pins search's
 // documented decode contract against an in-code fake `grep` child, because
 // no real binary can play that role yet (the subcommand does not exist —
-// the search pin above). Gating it would skip it everywhere, forever: the
-// contract it pins is the SDK's own decode behavior, which a fake child
-// exercises as well as a converged binary ever will — and it is the flip
-// target the search pin's comment names.
+// the search pin above); testClassifyDecodesTheDocumentedTaxonomyAndConfidenceRange
+// does the same for classify against a fake that answers with the documented
+// Classification JSON (the release binary gates classify behind the
+// 'profiles' feature — the classify pin above — so a gate would skip it
+// everywhere, forever); and testReadmeClassifySectionMatchesTheDocumentedShape
+// pins this README's Classify section (taxonomy table + confidence range)
+// against the same documented constant, needing no child at all. Gating the
+// decode pair would skip them everywhere, forever: the contract they pin is
+// the SDK's own decode behavior, which a fake child exercises as well as a
+// converged binary ever will — and they are the flip targets the argv pins'
+// comments name.
 //
 
 import XCTest
@@ -181,17 +188,19 @@ final class DocumentedApiConformanceTests: XCTestCase {
     /// argument per line into `<directory>/captured-argv.txt`, prints
     /// `stdoutLines`, and exits 0 — SourceBytesPassthroughTests' capture
     /// convention, without the spill copy (the input here is the test's own
-    /// fixture file, which the SDK never deletes). Only the decode-side
-    /// search test uses it: the child stands in for a binary whose `grep`
-    /// emits the documented Match NDJSON lines, a role no real binary can
-    /// play yet. Like StreamingStderrRegressionTests' fakes it ignores its
-    /// arguments' content — the argv capture, not the child's behavior, is
-    /// what proves which invocation it stood in for.
-    private static func writeArgCapturingGrep(
-        stdoutLines: [String]
+    /// fixture file, which the SDK never deletes). The decode-side tests use
+    /// it: the child stands in for a binary emitting the documented output —
+    /// `grep`'s Match NDJSON lines for search, classify's JSON object for
+    /// classify — roles no real binary can play yet. Like
+    /// StreamingStderrRegressionTests' fakes it ignores its arguments'
+    /// content — the argv capture, not the child's behavior, is what proves
+    /// which invocation it stood in for.
+    private static func writeArgCapturingFake(
+        stdoutLines: [String],
+        directoryPrefix: String
     ) throws -> (directory: URL, binaryPath: String, capturePath: String) {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("pdftract-search-contract-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("\(directoryPrefix)-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let capturePath = directory.appendingPathComponent("captured-argv.txt").path
         let binaryPath = directory.appendingPathComponent("pdftract").path
@@ -350,17 +359,22 @@ final class DocumentedApiConformanceTests: XCTestCase {
         }
     }
 
-    /// PIN, not contract. README "Classify document" promises a
-    /// `Classification` with a non-empty `category` and a `confidence` in
-    /// [0, 1]. Three divergences deep: the generated argv
+    /// PIN, not contract. README "Classify document" documents a
+    /// `Classification` whose `category` is one of the ten fixed
+    /// document-type strings and whose `confidence` is a `Double` in
+    /// [0, 1] (both pinned decode-side by
+    /// testClassifyDecodesTheDocumentedTaxonomyAndConfidenceRange below).
+    /// Three divergences deep: the generated argv
     /// (`classify --json <input>`) dies in clap — classify has no `--json`
     /// (its default output is already JSON, `--pretty` just indents it);
     /// behind that, the release binary gates classify itself behind the
     /// 'profiles' feature (exits 0 with an error line), so the documented
     /// contract is unreachable on the release binary even at the CLI level.
     /// When regeneration converges the argv and a profiles-enabled binary is
-    /// the target, flip to asserting category non-empty and confidence in
-    /// [0, 1] the way the template-owned ConformanceTests already sketches.
+    /// the target, flip to asserting the live category against the
+    /// documented taxonomy and the live confidence against [0, 1] —
+    /// testClassifyDecodesTheDocumentedTaxonomyAndConfidenceRange is the
+    /// shape that flip must keep holding.
     func testClassifyPinsTheCurrentArgvDivergence() async throws {
         let binary = try Self.requireBinary()
         let fixture = try Self.makePDF(pageTexts: ["\(Self.markerPrefix) 0"])
@@ -379,6 +393,208 @@ final class DocumentedApiConformanceTests: XCTestCase {
                 error.message.contains("unexpected argument '--json' found"),
                 "expected the unexpected-'--json' usage error, got: \(error.message.prefix(200))"
             )
+        }
+    }
+
+    // MARK: The documented classify shape — taxonomy and confidence range
+    // (pdfswift-d38d8233; decode-side, no binary gate — see the file header)
+
+    /// The documented `Classification.category` vocabulary (README "Classify
+    /// document"): the ten fixed document-type strings the classifier emits,
+    /// upstream from `ProfileType` (pdftract
+    /// crates/pdftract-core/src/profiles/types.rs) via the CLI's
+    /// `profile_type_to_string` (crates/pdftract-cli/src/classify.rs).
+    /// `category` is a plain `String` on the SDK side — no Swift enum — so
+    /// this constant is the whole machine-readable form of that
+    /// documentation; the README test below pins the README's taxonomy
+    /// table against it, and the decode test round-trips every member.
+    private static let documentedClassifyCategories = [
+        "invoice", "receipt", "contract", "scientific_paper", "slide_deck",
+        "form", "bank_statement", "legal_filing", "book_chapter", "unknown",
+    ]
+
+    /// `<repo root>`, derived from this file's location
+    /// (`<root>/Tests/PdftractTests/DocumentedApiConformanceTests.swift`) —
+    /// VersionStampConsistencyTests' derivation verbatim — so the README
+    /// test reads the checked-out tree it was compiled from and works in
+    /// any checkout path, including `git archive` extractions.
+    private var repoRoot: String {
+        let filePath = #filePath
+        let fileDir = (filePath as NSString).deletingLastPathComponent
+        let testsDir = (fileDir as NSString).deletingLastPathComponent
+        return (testsDir as NSString).deletingLastPathComponent
+    }
+
+    /// Pins this repo's README Classify section against
+    /// `documentedClassifyCategories` and the documented confidence range.
+    /// Deliberately NOT gated on a binary and needing no child at all: it
+    /// reads `README.md` relative to `#filePath` (the
+    /// VersionStampConsistencyTests convention), so it runs — and fails
+    /// loudly — in every environment `swift test` runs in, including
+    /// binary-less CI containers. What it pins:
+    ///
+    /// - the Classify section's taxonomy table enumerates exactly the ten
+    ///   documented categories (set equality — a renamed, added, dropped,
+    ///   or typoed category fails here, forcing the change through
+    ///   `documentedClassifyCategories` and the decode test below
+    ///   consciously);
+    /// - the section states the confidence scale as the closed-range
+    ///   literal `0.0...1.0` (a rewording that drops or rescales it —
+    ///   0–100 percentages, an open range — fails here rather than
+    ///   silently un-documenting it).
+    ///
+    /// This is the doc-side twin of
+    /// testClassifyDecodesTheDocumentedTaxonomyAndConfidenceRange: together
+    /// they keep the README and the decode pin on one taxonomy.
+    func testReadmeClassifySectionMatchesTheDocumentedShape() throws {
+        let readme = try String(
+            contentsOfFile: repoRoot + "/README.md",
+            encoding: .utf8
+        )
+        guard let sectionStart = readme.range(of: "### Classify document") else {
+            XCTFail("README.md has no '### Classify document' section — the classify documentation is gone")
+            return
+        }
+        let afterStart = sectionStart.upperBound..<readme.endIndex
+        let sectionEnd = readme
+            .range(of: "\n### ", options: .literal, range: afterStart)?
+            .lowerBound ?? readme.endIndex
+        let section = String(readme[sectionStart.lowerBound..<sectionEnd])
+
+        // Parse the taxonomy table body: rows after the `|---|---|`
+        // separator whose first cell is a backticked value. The header row
+        // (`| `category` | Document type |`) sits before the separator and
+        // so never parses as a category.
+        var documented: Set<String> = []
+        var pastSeparator = false
+        for line in section.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("|"), trimmed.contains("-"), !trimmed.contains("`") {
+                pastSeparator = true
+                continue
+            }
+            guard pastSeparator, trimmed.hasPrefix("| `") else { continue }
+            let value = trimmed.dropFirst(3).prefix(while: { $0 != "`" })
+            documented.insert(String(value))
+        }
+
+        XCTAssertEqual(
+            documented, Set(Self.documentedClassifyCategories),
+            "README Classify taxonomy table must enumerate exactly the ten documented categories — update documentedClassifyCategories and the decode test together with the README"
+        )
+
+        XCTAssertTrue(
+            section.contains("0.0...1.0"),
+            "README Classify section must state the confidence scale as the closed range 0.0...1.0"
+        )
+    }
+
+    /// The documented classify contract, pinned on the decode side against
+    /// a fixture PDF. Deliberately NOT gated on a real binary (see the file
+    /// header): the release binary gates classify behind the 'profiles'
+    /// feature — on top of the argv divergence the pin above documents — so
+    /// a gate would skip it everywhere, forever. A fake child answers with
+    /// the documented wire shape — one `Classification` JSON object with
+    /// `category` drawn from the documented taxonomy, `confidence` inside
+    /// the documented `0.0...1.0` range — and this test asserts what the
+    /// README promises the SDK yields:
+    ///
+    /// - every documented category string survives the decode intact (a
+    ///   decode-side rename or mangling fails the per-category equality);
+    /// - `confidence` round-trips and lands inside the closed documented
+    ///   range, with both boundary values (0.0, 1.0) decoding exactly;
+    /// - the captured argv proves the fixture PDF itself was the classified
+    ///   input: the `classify` subcommand with the fixture path last. The
+    ///   flags in between are deliberately NOT pinned here — that is
+    ///   testClassifyPinsTheCurrentArgvDivergence's job, and the whole
+    ///   point of that pin is that the current flag set is wrong.
+    ///
+    /// This is the flip target for
+    /// testClassifyPinsTheCurrentArgvDivergence: when a profiles-enabled,
+    /// argv-converged binary is the target, these decode assertions must
+    /// keep holding against its live output. One honesty note: the wire
+    /// field names this fake emits (`category`, `tags`, `heuristics`) are
+    /// the SDK type's own — the upstream CLI's classify JSON names its
+    /// fields `document_type`, `reasons`, `runner_up`, `runner_up_confidence`
+    /// (crates/pdftract-cli/src/classify.rs ClassificationOutput), a
+    /// divergence layer owned by pdfswift-ccccb2ff; this test pins the
+    /// SDK's documented decode contract, not any binary's wire format.
+    func testClassifyDecodesTheDocumentedTaxonomyAndConfidenceRange() async throws {
+        let fixture = try Self.makePDF(pageTexts: ["\(Self.markerPrefix) 0"])
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+
+        // Every documented category, decoded from the documented wire shape
+        // at a mid-range confidence. The payload is ASCII with no single
+        // quotes, so it can sit inside the fake's single-quoted echo as-is.
+        for category in Self.documentedClassifyCategories {
+            let fake = try Self.writeArgCapturingFake(
+                stdoutLines: ["{\"category\":\"\(category)\",\"confidence\":0.87,"
+                    + "\"tags\":[\"billing\"],\"heuristics\":{\"has_table\":true}}"],
+                directoryPrefix: "pdftract-classify-contract"
+            )
+            defer { try? FileManager.default.removeItem(at: fake.directory) }
+
+            let client = Pdftract(binaryPath: fake.binaryPath)
+            let classification = try await client.classify(.path(fixture.path))
+
+            XCTAssertEqual(
+                classification.category, category,
+                "category must survive the decode intact (\(category))"
+            )
+            XCTAssertTrue(
+                Self.documentedClassifyCategories.contains(classification.category),
+                "decoded category must be a documented taxonomy member, got \(classification.category)"
+            )
+            XCTAssertEqual(
+                classification.confidence, 0.87, accuracy: 1e-12,
+                "confidence must round-trip the decoded value"
+            )
+            XCTAssertGreaterThanOrEqual(
+                classification.confidence, 0.0,
+                "decoded confidence must sit inside the documented 0.0...1.0 range"
+            )
+            XCTAssertLessThanOrEqual(
+                classification.confidence, 1.0,
+                "decoded confidence must sit inside the documented 0.0...1.0 range"
+            )
+            XCTAssertEqual(
+                classification.tags, ["billing"],
+                "tags must decode alongside the documented fields"
+            )
+            XCTAssertEqual(
+                classification.heuristics, ["has_table": true],
+                "heuristics must decode alongside the documented fields"
+            )
+
+            let argv = try Self.capturedArguments(from: fake.capturePath)
+            XCTAssertEqual(
+                argv.first, "classify",
+                "classify() must invoke the classify subcommand"
+            )
+            XCTAssertEqual(
+                argv.last, fixture.path,
+                "classify() must pass the fixture path as the classified input"
+            )
+        }
+
+        // The documented range's boundaries decode exactly — the range is
+        // closed. (The SDK does not enforce the range at decode time — a
+        // fake emitting 1.5 decodes fine; the range is the classifier's
+        // documented output contract, validated upstream, not a decode
+        // invariant.)
+        for boundary in [0.0, 1.0] {
+            let fake = try Self.writeArgCapturingFake(
+                stdoutLines: ["{\"category\":\"invoice\",\"confidence\":\(boundary),"
+                    + "\"tags\":[],\"heuristics\":{}}"],
+                directoryPrefix: "pdftract-classify-contract-boundary"
+            )
+            defer { try? FileManager.default.removeItem(at: fake.directory) }
+
+            let client = Pdftract(binaryPath: fake.binaryPath)
+            let classification = try await client.classify(.path(fixture.path))
+            XCTAssertEqual(classification.confidence, boundary, accuracy: 1e-12)
+            XCTAssertGreaterThanOrEqual(classification.confidence, 0.0)
+            XCTAssertLessThanOrEqual(classification.confidence, 1.0)
         }
     }
 
@@ -589,7 +805,10 @@ final class DocumentedApiConformanceTests: XCTestCase {
                 + "\"context\":{\"before\":\"preamble \(index) before \","
                 + "\"after\":\" after \(index) trailing\"}}"
         }
-        let fake = try Self.writeArgCapturingGrep(stdoutLines: matchLines)
+        let fake = try Self.writeArgCapturingFake(
+            stdoutLines: matchLines,
+            directoryPrefix: "pdftract-search-contract"
+        )
         defer { try? FileManager.default.removeItem(at: fake.directory) }
 
         let client = Pdftract(binaryPath: fake.binaryPath)

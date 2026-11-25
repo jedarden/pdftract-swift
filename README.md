@@ -258,6 +258,31 @@ print("Category: \(classification.category)")
 print("Confidence: \(classification.confidence)")
 ```
 
+`category` is one of ten fixed document-type strings — the classifier's whole
+output vocabulary, never free text:
+
+| `category` | Document type |
+|---|---|
+| `invoice` | Commercial transaction request for payment |
+| `receipt` | Proof of payment |
+| `contract` | Legal agreement between parties |
+| `scientific_paper` | Academic research article (abstract, references) |
+| `slide_deck` | Presentation slides (PowerPoint/PDF export) |
+| `form` | Fillable fields, structured data entry |
+| `bank_statement` | Financial account statement |
+| `legal_filing` | Court or legal filing |
+| `book_chapter` | Book excerpt with chapter structure |
+| `unknown` | Fallback when no profile matches |
+
+`confidence` is not a percentage: it is a `Double` in the closed range
+`0.0...1.0` — the fraction of the winning profile's weighted predicates the
+document matched, so 1.0 means every predicate matched and 0.0 means none
+did. Profiles also carry individual acceptance thresholds: when even the
+best-scoring profile falls below its own threshold, `category` is `unknown`
+and `confidence` carries that best below-threshold score rather than 0.0 —
+`unknown` is a real classification result, not an error, and a low
+confidence is not a zero confidence.
+
 ### Verify receipt
 
 A receipt is produced at extraction time: run `pdftract extract` with
