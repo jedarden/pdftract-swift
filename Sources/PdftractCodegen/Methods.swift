@@ -801,7 +801,15 @@ public struct Pdftract: Sendable {
     /// content hash. The receipt's `extraction_version` must match the binary's
     /// major and minor version or verification fails before those checks.
     /// - Parameters:
-    ///   - path: Path to the PDF file.
+    ///   - path: Path to the PDF file. A plain path rather than a `Source` —
+    ///     the one method without a `Source` parameter — because the
+    ///     `verify-receipt` CLI reads the PDF from local disk only and has no
+    ///     URL form (unlike `extract`, whose URL inputs the binary fetches
+    ///     itself); `Source` advertises `.url` to every method that accepts
+    ///     it, so accepting `Source` here would advertise a case the CLI
+    ///     could not honor. With in-memory PDF bytes, write them to a file
+    ///     and pass its path — the same materialization `Source.bytes`
+    ///     performs for the other methods.
     ///   - receipt: The receipt to verify — its `data` must be the path of a
     ///     receipt JSON file (see `Receipt`); the string is passed to the CLI
     ///     unchanged.

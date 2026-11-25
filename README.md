@@ -49,7 +49,9 @@ Every method that takes a `Source` also accepts `.bytes` with in-memory `Data`,
 so documents received over the network or built in memory never need a file of
 their own. The SDK spills the bytes to a private temporary file for the pdftract
 process and deletes it when the call finishes — success, error, timeout, or
-cancellation — so no manual cleanup is required.
+cancellation — so no manual cleanup is required. (`verifyReceipt` is the one
+method that takes no `Source` at all — see [Verify receipt](#verify-receipt)
+below for why.)
 
 ### Extract with OCR
 
@@ -144,6 +146,15 @@ let receipt = Receipt(data: "/tmp/span-14.receipt.json")
 let result = try await client.verifyReceipt("/path/to/receipt.pdf", receipt: receipt)
 print("Valid: \(result.valid)")
 ```
+
+The PDF parameter is a plain path string rather than a `Source` — the one
+method in this SDK without a `Source` parameter. That is deliberate:
+`verify-receipt` reads the PDF from local disk only and has no URL form
+(unlike `extract`, whose URL inputs the binary fetches itself), while
+`Source` advertises `.url` to every method that accepts it — so accepting
+`Source` here would advertise a case the CLI could not honor. In-memory PDF
+bytes work the same way as the in-memory receipt JSON above: write them to
+a file and pass its path.
 
 Verification re-extracts `page_index` from the PDF and checks, in order: the
 PDF fingerprint matches the receipt's, some span overlaps the receipt's `bbox`
