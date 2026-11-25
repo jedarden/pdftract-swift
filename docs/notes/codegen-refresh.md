@@ -67,13 +67,20 @@ pdftract sdk codegen --lang swift --version <X.Y.Z> --out ~/pdftract-swift
 cd ~/pdftract
 pdftract sdk validate --lang swift --sdk-dir ~/pdftract-swift
 
-# 4. Build-verify exactly what the CI gate runs.
+# 4. Build-verify, then run the conformance suites unfiltered. Since the
+#    pdfswift-8f868708 XCTSkip guards, every binary-dependent test skips
+#    cleanly when no pdftract binary is on PATH, so a binary-less
+#    environment exercises the conformance and stream suites without a
+#    --filter. One caveat: in docker-class containers ProcessLifecycleTests
+#    fails 3/6 for environment reasons unrelated to any drop (pre-existing;
+#    cancellation and timeouts never reach the spawned child there) — see
+#    the CI map below before reading an unfiltered container run:
 cd ~/pdftract-swift
 swift build && swift build --build-tests
-swift test --filter 'StreamingStderrRegressionTests|ExitCodeMappingTests'
+swift test
 # No local Swift toolchain? The swift:5.10-jammy image is what CI uses:
 docker run --rm -v "$PWD:/workspace" -w /workspace swift:5.10-jammy \
-  bash -c 'swift build && swift build --build-tests && swift test --filter "StreamingStderrRegressionTests|ExitCodeMappingTests"'
+  bash -c 'swift build && swift build --build-tests && swift test'
 
 # 5. Commit the regenerated drop and the .codegen-version bump together.
 ```
@@ -172,24 +179,40 @@ history:
   reported every `.swift` file in sync.
 - `pdfswift-6bc41168` (fef69c4): concurrent stderr drain in the streaming
   APIs, mirrored upstream in pdftract `eeab77e7` so future refreshes keep it.
+- `pdfswift-8f868708` (2026-11-24): XCTSkip guards for the binary-dependent
+  conformance tests (`requireBinary()` mirroring the client's PATH scan) and
+  a probe fix — `testBinaryAvailable` asserted `pdftract --version`, which no
+  pdftract build accepts (the CLI registers no version flag, so clap exits
+  2); the probe is now `--help`. Fixed in the Swift test template on pdftract
+  local main — the unlanded lineage this repo's drops come from, same
+  standing as the `a2ed4c967` lifecycle-test fix — and regenerated here as a
+  delta confined to `Tests/PdftractTests/ConformanceTests.swift`.
 
 ## What runs where (CI map)
 
 | When | Workflow (iad-ci) | What it does |
 |---|---|---|
-| Every push to `main` | `pdftract-swift-build` | `swift build` + `swift build --build-tests` on `swift:5.10-jammy`, then `swift test --filter 'StreamingStderrRegressionTests\|ExitCodeMappingTests'` (the two fake-binary suites). A regenerated drop that breaks either target, or regresses stderr draining or exit-code mapping, fails here. Still deliberately does **not** run unfiltered `swift test` — the conformance suite needs the real binary. |
+| Every push to `main` | `pdftract-swift-build` | `swift build` + `swift build --build-tests` on `swift:5.10-jammy`, then `swift test --filter 'StreamingStderrRegressionTests\|ExitCodeMappingTests'` (the two fake-binary suites). A regenerated drop that breaks either target, or regresses stderr draining or exit-code mapping, fails here. The filter predates the pdfswift-8f868708 XCTSkip guards, which removed the conformance-suite reason for it: binary-less, `ExtractStreamConformanceTests` now skips cleanly and could be safely added to the gate. A wholesale drop is still blocked, but for a different pre-existing reason: `ProcessLifecycleTests` fails 3/6 in docker-class containers (observed identically on the pre-guard tree, 2026-11-25 — cancel/timeout/drop-before-iteration; cancellation and timeouts don't reach the spawned child in that environment), and adding it would turn this gate red. Investigating that is its own piece of work; loosening the filter is a declarative-config change to `pdftract-swift-build-workflowtemplate.yml`. |
 | pdftract release `N` | `pdftract-swift-publish` (via `pdftract-release-cascade`) | Clones this repo, runs `swift test --filter ConformanceTests` against the release-`N` binary (must pass), tags `N`, warms Swift Package Index. Idempotent — skips an existing tag. |
 
 Both templates live in `jedarden/declarative-config` under
 `k8s/iad-ci/argo-workflows/` (`pdftract-swift-build-workflowtemplate.yml`,
 `pdftract-swift-publish.yaml`).
 
-One local-testing gotcha the table implies: the generated
-`ConformanceTests.swift` asserts a real `pdftract` binary answers
-`pdftract --version` on `PATH` (its first test fails with "pdftract binary not
-found on PATH" otherwise), so bare `swift test` without the binary installed
-cannot pass. Compile-verify locally with the gate's
-`swift build --build-tests`; run the full suite only where the binary exists.
+One local-testing gotcha the table used to imply, resolved 2026-11-24
+(pdfswift-8f868708): the generated `ConformanceTests.swift` used to assert a
+real `pdftract` binary answers `pdftract --version` on `PATH`, so bare
+`swift test` without the binary failed — and, less visibly, with the binary
+failed too, because the CLI registers no `--version` flag (clap exits 2 on
+it). Both are fixed in the template: a `requireBinary()` helper throws
+XCTSkip when the client's PATH scan would find nothing (the same guard
+`ExtractStreamConformanceTests` carries), and the probe is `--help`, which
+every pdftract build answers with exit 0. Bare `swift test` in a binary-less
+environment now exercises every suite — the real-binary ones skip cleanly,
+the fake/stub ones run — so compile-verification is no longer the only thing
+such a run can tell you. The one remaining binary-less failure set is
+pre-existing and unrelated to any drop: `ProcessLifecycleTests` fails 3/6 in
+docker-class containers (see the CI map above).
 
 ## Follow-up (optional, upstream)
 

@@ -10,6 +10,40 @@ final class ConformanceTests: XCTestCase {
     var client: Pdftract!
     var suite: [String: Any]?
 
+    // MARK: Binary guard
+
+    /// Resolves the pdftract binary the same way the client's PATH scan does,
+    /// or throws XCTSkip when none can be resolved. Mirrors `Pdftract`'s
+    /// resolution (`isExecutableFile`, not `fileExists`) so "skip" and
+    /// "spawn" can never disagree about whether a binary is available.
+    ///
+    /// Without this guard a bare `swift test` on a machine without pdftract
+    /// installed *fails* on the binary-dependent tests instead of skipping
+    /// them — the reason the generated suite could only ever run under a
+    /// `--filter` that excluded it. Every test below that needs the real
+    /// binary throws the skip from here. The suites that drive their own
+    /// fake/stub binaries (`StreamingStderrRegressionTests`,
+    /// `ProcessLifecycleTests`, and any exit-code table the template emits)
+    /// never call it and always run.
+    private static func requireBinary() throws -> String {
+        #if os(Linux)
+        let entries = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+        #else
+        let entries = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ";")
+            .map(String.init)
+        #endif
+        for entry in entries {
+            let candidate = NSString.path(withComponents: [entry, "pdftract"])
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        throw XCTSkip("pdftract binary not found on PATH; the conformance tests need a real binary")
+    }
+
     override func setUp() {
         client = Pdftract()
 
@@ -21,15 +55,24 @@ final class ConformanceTests: XCTestCase {
         }
     }
 
+    /// The availability smoke test: an executable named `pdftract` on PATH
+    /// must actually run. The CLI registers no `--version` flag, so the probe
+    /// is `--help` — the cheapest invocation every pdftract build answers
+    /// with exit 0. (The `--version` probe this test once asserted exited
+    /// non-zero on every real binary: clap usage error 2, "unexpected
+    /// argument" — which is why the suite never passed anywhere a real
+    /// binary was installed, either.)
     func testBinaryAvailable() async throws {
+        let binary = try Self.requireBinary()
+
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["sh", "-c", "pdftract --version"]
+        process.executableURL = URL(fileURLWithPath: binary)
+        process.arguments = ["--help"]
 
         try process.run()
         process.waitUntilExit()
 
-        XCTAssertEqual(process.terminationStatus, 0, "pdftract binary not found on PATH")
+        XCTAssertEqual(process.terminationStatus, 0, "pdftract binary at \(binary) failed --help")
     }
 
     func testConformance() async throws {
@@ -37,6 +80,10 @@ final class ConformanceTests: XCTestCase {
               let cases = suite["cases"] as? [[String: Any]] else {
             throw XCTSkip("No conformance suite loaded")
         }
+
+        // The suite file is present, so every case below would drive the
+        // real binary — skip rather than fail when none can be resolved.
+        _ = try Self.requireBinary()
 
         for testCase in cases {
             let id = testCase["id"] as? String ?? "unknown"

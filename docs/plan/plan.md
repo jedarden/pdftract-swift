@@ -19,8 +19,9 @@ The first hand-written `docs/notes/` document is
 from the pdftract codegen pipeline (which command emits which paths, `.codegen-version`
 lockstep with binary releases, how to read `pdftract sdk validate` findings, and the
 fix-upstream-then-regenerate rule that ADR-1 depends on), plus a CI map of which
-iad-ci workflow runs where and why bare `swift test` cannot pass without the real
-binary installed.
+iad-ci workflow runs where. (Until 2026-11-24 this section also explained why bare
+`swift test` could not pass without the real binary installed; the
+pdfswift-8f868708 XCTSkip guards below removed that constraint.)
 
 ## Current shipped state (as of 2026-07-20 audit)
 
@@ -58,6 +59,34 @@ retargeted from a v1.1.0 binary to the 1.2.0 drop's binary, built from
 pdftract main `a2ed4c967`; upstream pdftract has not cut a v1.2.0 release tag
 yet (only `v0.1.0-test`), so the release-cascade `pdftract-swift-publish` run
 that exercises the real release binary can't fire until it does.
+
+Status update 2026-11-24 (pdfswift-8f868708): bare `swift test` now passes
+without pdftract installed. The binary-dependent tests in the generated
+`ConformanceTests.swift` skip cleanly via a `requireBinary()` XCTSkip guard
+that mirrors the client's PATH resolution (`isExecutableFile`, the same
+pattern the hand-written `ExtractStreamConformanceTests` already used), so
+every suite either runs (the fake/stub-binary ones) or skips (the
+real-binary ones) in a binary-less environment. The guard surfaced a second,
+latent defect in the same test: `testBinaryAvailable` asserted
+`pdftract --version`, but the CLI registers no `--version` flag — the probe
+exited 2 on every real binary, meaning the suite could never pass anywhere a
+binary *was* installed either (unobservable until now because the suite only
+ever ran without one). The probe is now `--help`, which every pdftract build
+answers with exit 0. Fixed in the template on pdftract local main (unlanded
+lineage, same standing as the `a2ed4c967` lifecycle-test fix) and
+regenerated here as a 50/3-line delta in `Tests/PdftractTests/ConformanceTests.swift`
+only; `pdftract sdk validate` reports zero MODIFIED/MISSING findings under
+generated paths. Consequence for CI: the conformance-suite reason for the
+build gate's `--filter 'StreamingStderrRegressionTests|ExitCodeMappingTests'`
+is gone — binary-less, `ExtractStreamConformanceTests` now skips cleanly and
+could be safely added to the gate. A wholesale filter drop is still blocked
+by a pre-existing, unrelated condition: `ProcessLifecycleTests` fails 3/6 in
+docker-class containers (identical on the pre-guard tree — cancellation,
+timeout, and drop-before-iteration don't reach the spawned child there), so
+adding it would turn the gate red until that is understood. Loosening the
+filter is a declarative-config change (`pdftract-swift-build-workflowtemplate.yml`)
+and remains to be made there. Full unfiltered run *with* a real binary on
+PATH is still pdfswift-3307a377's verification.
 
 ## ADR-1: 2026-07-20 — CI-gated build/release pipeline for the generated Swift SDK, plus an interim naming-compatibility shim
 
