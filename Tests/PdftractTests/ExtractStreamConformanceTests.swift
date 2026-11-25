@@ -35,8 +35,10 @@
 // DocumentedApiConformanceTests established: each asserts the binary's
 // CURRENT behavior and its comment names the documented contract (the
 // original assertion, kept verbatim) to flip back to when the generator
-// converges with the binary (proposal pdfswift-ccccb2ff). Test 4 holds as
-// written (zero lines in, zero pages out) and stays a contract test. A green
+// converges with the binary (proposal pdfswift-ccccb2ff). Test 4 could not
+// hold either: the release binary REFUSES a zero-page PDF outright (exit 1,
+// "Document contains no pages" — never a stream, never an empty one), so it
+// is a pin too. A green
 // run here must never be read as "the README contract holds against a real
 // binary" — for that, see the flip notes per test.
 //
@@ -295,22 +297,36 @@ final class ExtractStreamConformanceTests: XCTestCase {
         }
     }
 
-    /// A trivial zero-page PDF yields a zero-page stream — not an error and
-    /// not a phantom page. The one documented-contract test here that holds
-    /// against the release binary as-is: a zero-page PDF produces zero
-    /// NDJSON lines, so the divergence pinned above has nothing to bite on
-    /// and the documented result (an empty stream, not an error) is
-    /// observable reality.
-    func testTrivialEmptyPdfYieldsZeroPages() async throws {
+    /// PIN, not contract. The README's zero-page contract — a trivial
+    /// zero-page PDF yields a zero-page stream, not an error and not a
+    /// phantom page — is unreachable on the release binary at the fixture
+    /// level: the binary REFUSES a zero-page document outright (both
+    /// extract forms, buffered and `--ndjson`), exiting 1 with
+    /// "Failed to extract PDF: <path> / Caused by: Document contains no
+    /// pages" before any line is written. The SDK maps that exit to the
+    /// base `PdftractError` (exit 1 is in no named-error row), carrying
+    /// the child's stderr — which is what this pin holds, probed
+    /// 2026-11-25 (pdfswift-3307a377). When a binary accepts zero-page
+    /// documents, this reds — flip it back to the documented assertion:
+    /// drain completes cleanly with `pages.count == 0`.
+    func testZeroPagePdfPinsTheBinaryDocumentContainsNoPagesRefusal() async throws {
         let binary = try Self.requireBinary()
         let fixture = try Self.makePDF(pageTexts: [])
         defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
 
         let client = Pdftract(binaryPath: binary)
-        let pages = try await Self.drain(client.extractStream(.path(fixture.path)))
-
-        // `Page` is Codable but not Equatable, so assert on the count rather
-        // than comparing arrays.
-        XCTAssertEqual(pages.count, 0, "an empty PDF must stream zero pages")
+        do {
+            _ = try await Self.drain(client.extractStream(.path(fixture.path)))
+            XCTFail("zero-page PDF streamed — the refusal pin is stale; assert the documented zero-page stream instead")
+        } catch let error as PdftractError {
+            XCTAssertEqual(
+                error.exitCode, 1,
+                "expected the binary's zero-page refusal (exit 1), got exit \(error.exitCode)"
+            )
+            XCTAssertTrue(
+                error.message.contains("Document contains no pages"),
+                "expected the 'Document contains no pages' cause, got: \(error.message.prefix(200))"
+            )
+        }
     }
 }

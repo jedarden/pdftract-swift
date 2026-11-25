@@ -141,17 +141,23 @@ set -e
 # The zero-skip demand is the point of this script. Without it, a wrong
 # checksum, a bad mount, or a PATH mistake degrades every binary-gated
 # suite into its XCTSkip guard and the run "passes" having exercised
-# nothing.
+# nothing. A failed run keeps its full output at a stable path for
+# diagnosis (the work dir itself is trap-cleaned).
+KEEP_LOG=/tmp/e2e-binary-verification-failure.log
 SKIPS="$(grep -c "Test Case.*skipped" "$WORK/test-output.log" || true)"
 if [ "$STATUS" -ne 0 ]; then
-    echo "== FAIL (exit $STATUS): suite failed with pdftract v${VERSION} on PATH — see $WORK/test-output.log" >&2
-    echo "   (log retained: $WORK/test-output.log)" >&2
+    cp "$WORK/test-output.log" "$KEEP_LOG"
+    echo "== FAIL (exit $STATUS): suite failed with pdftract v${VERSION} on PATH" >&2
+    echo "   full output retained: $KEEP_LOG" >&2
+    grep -E "Test Case.*(failed|error)" "$KEEP_LOG" | head -20 >&2 || true
     exit "$STATUS"
 fi
 if [ "$SKIPS" -ne 0 ]; then
+    cp "$WORK/test-output.log" "$KEEP_LOG"
     echo "== FAIL: $SKIPS test(s) SKIPPED in the provisioned run — every skip is a" >&2
     echo "   provisioning failure or a pin that stopped running. Skipped cases:" >&2
-    grep "Test Case.*skipped" "$WORK/test-output.log" >&2
+    grep "Test Case.*skipped" "$KEEP_LOG" >&2
+    echo "   full output retained: $KEEP_LOG" >&2
     exit 4
 fi
 

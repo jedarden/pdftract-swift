@@ -1005,16 +1005,19 @@ final class DocumentedApiConformanceTests: XCTestCase {
 
     /// PIN for the buffered extraction's wire schema: the release binary's
     /// real `extract --json -` stdout cannot decode into the SDK's
-    /// `Document` — the decoder fails on `schema_version` first (the key
-    /// does not exist in the binary's output; behind it, the binary's
-    /// pages carry `index` rather than `page_index` and no
-    /// `width`/`height`/`rotation`, three more keyNotFound failures queued
-    /// behind the first). This is the buffered extraction's second
-    /// divergence layer, behind the argv layer the stream-side pins hold —
-    /// even a corrected argv would surface this drift. When the binary
-    /// emits Document-shaped JSON, this reds — flip to asserting the
-    /// decoded document's page count and per-page marker text.
-    func testBufferedDocumentDecodePinsTheSchemaVersionDrift() async throws {
+    /// `Document` — but the failure fires one layer deeper than the 2026-11-24
+    /// probe expected. The binary's top level DOES carry `schema_version`
+    /// ("1.0", sorted after `pages` in its pretty-printed output — easy to
+    /// miss in a truncated sample), so `Document.schemaVersion` and
+    /// `Document.metadata` (whose `page_count` the binary supplies) decode
+    /// fine; the first keyNotFound is `page_index` inside `pages[0]` — the
+    /// binary's pages carry `index` instead, and `width`/`height`/
+    /// `rotation` are absent entirely, so the page WRAPPER is the whole
+    /// drift. Probed against the real decode 2026-11-25 (pdfswift-3307a377):
+    /// this pin holds the executable form of that fact. When the binary's
+    /// pages carry the SDK's wrapper keys, this reds — flip to asserting
+    /// the decoded document's page count and per-page marker text.
+    func testBufferedDocumentDecodePinsThePageWrapperSchemaDrift() async throws {
         let binary = try Self.requireBinary()
         let fixture = try Self.makePDF(
             pageTexts: (0..<2).map { "\(Self.markerPrefix) \($0)" }
@@ -1026,17 +1029,24 @@ final class DocumentedApiConformanceTests: XCTestCase {
         )
         XCTAssertEqual(run.exitCode, 0, "extract --json - must exit cleanly on the fixture")
 
+        // The pin's premise, held executable: schema_version is present and
+        // decodes — the drift is NOT at the document level.
+        guard let doc = try JSONSerialization.jsonObject(with: run.stdout) as? [String: Any],
+              (doc["schema_version"] as? String)?.hasPrefix("1") == true else {
+            throw ProbeFailure("extract --json - stdout lost its schema_version member — the pin's premise changed")
+        }
+
         do {
             _ = try JSONDecoder().decode(Document.self, from: run.stdout)
-            XCTFail("Document decoded — the schema-drift pin is stale; assert the decoded document's pages instead")
+            XCTFail("Document decoded — the page-wrapper drift pin is stale; assert the decoded document's pages instead")
         } catch let error as DecodingError {
             guard case .keyNotFound(let key, _) = error else {
-                XCTFail("expected keyNotFound on schema_version, got \(error)")
+                XCTFail("expected keyNotFound, got \(error)")
                 return
             }
             XCTAssertEqual(
-                key.stringValue, "schema_version",
-                "the first missing key must be schema_version — the binary's output has no schema version"
+                key.stringValue, "page_index",
+                "the first missing key must be page_index — the binary's pages carry `index`, with no width/height/rotation"
             )
         } catch {
             XCTFail("expected a DecodingError, got \(error)")
