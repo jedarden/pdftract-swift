@@ -376,6 +376,51 @@ lifecycle errors come from the SDK instead (see the next section):
 | `TimeoutError` | -1 | The process outlived the caller-provided `timeout:` and was terminated |
 | `CancellationError` | — | The surrounding Swift `Task` was cancelled; the process was terminated |
 
+### Error hierarchy
+
+The exit-code errors in the first table plus `TimeoutError` are all
+`final class` **subclasses of `PdftractError`**. The base class carries the
+fields every handler needs — `message: String` and `exitCode: Int` — and
+each subclass adds nothing: it exists so a caller can catch that one
+failure. The `PdftractError` row itself (`other`) is the base class thrown
+directly, for a non-zero exit code outside the table or a spawn failure
+(exit code `-1`).
+
+That relationship is what makes the single `catch let error as PdftractError`
+above cover every `pdftract` failure: Swift's `as` pattern matches
+subclasses, so one clause catches `CorruptPdfError`, `EncryptionError`, …,
+`TimeoutError`, and unmapped exit codes alike.
+
+Two throwables sit outside the hierarchy and are **not** caught by it:
+
+- **`CancellationError`** — the standard-library struct thrown when the
+  surrounding `Task` is cancelled; it shares no type with `PdftractError`.
+- **`MalformedStreamError`** — a `struct`, not a `PdftractError` subclass,
+  so a base-type catch will not bind it. Current SDK methods never throw
+  it: undecodable NDJSON lines are surfaced through `onSkippedLine:`
+  instead (see the streaming section below).
+
+To treat one failure mode differently, catch the specific subclass
+**before** any base-class catch — Swift tries `catch` clauses in order, so
+a base `PdftractError` clause placed first would swallow every subclass:
+
+```swift
+do {
+    let doc = try await client.extract(.path("document.pdf"))
+} catch let error as EncryptionError {
+    promptForPassword() // most specific clauses first
+} catch let error as TimeoutError {
+    retryOrFail() // deadline expiry — exit code -1
+} catch let error as PdftractError {
+    // CorruptPdfError, TlsError, … and every unmapped exit code
+    print("pdftract failed (code \(error.exitCode)): \(error.message)")
+}
+```
+
+Because the subclasses add no stored properties, switching on
+`error.exitCode` inside a single base-class catch is equivalent to the
+multi-clause form.
+
 ### Errors from the streaming methods
 
 `extractStream` and `search` return `AsyncThrowingStream`s and throw the same
