@@ -1,7 +1,8 @@
 //
 // Real-binary conformance pins for the README-documented APIs that had no
 // test coverage anywhere: `extractText`, `extractMarkdown`, `hash`,
-// `classify`, and the `.url` / `.bytes` `Source` cases (pdfswift-a53be3d4).
+// `classify`, `search`, and the `.url` / `.bytes` `Source` cases
+// (pdfswift-a53be3d4; search folded in by pdfswift-41c46c80).
 //
 // Hand-written, not generated: this file is not a codegen template output, so
 // `pdftract sdk codegen` leaves it alone (the generator only writes files that
@@ -51,6 +52,13 @@
 //                   this SDK decodes, so every line fails Page decoding and
 //                   surfaces through `onSkippedLine` while the stream yields
 //                   zero pages.
+//   search          `grep <pattern> <input>`       → exit 2, clap:
+//                   "unrecognized subcommand 'grep'" — no available binary
+//                   (the v1.2.0 musl release or either local lineage build)
+//                   has a grep subcommand at all, so search cannot produce
+//                   a single match anywhere. The child dies before the
+//                   source argument is examined, which is what makes this a
+//                   pure argv-layer pin.
 //
 // Every assertion below pins the CURRENT binary-observable behavior, not the
 // README's promise. That is deliberate and temporary: when the generator
@@ -70,6 +78,15 @@
 // extract PDF", exit 1, for every input including the committed probe
 // fixture), so the source-case pins assert only what the release binary is
 // known to do.
+//
+// One test here is deliberately NOT gated that way:
+// testSearchYieldsMatchesWithDocumentedPageAndContextFields pins search's
+// documented decode contract against an in-code fake `grep` child, because
+// no real binary can play that role yet (the subcommand does not exist —
+// the search pin above). Gating it would skip it everywhere, forever: the
+// contract it pins is the SDK's own decode behavior, which a fake child
+// exercises as well as a converged binary ever will — and it is the flip
+// target the search pin's comment names.
 //
 
 import XCTest
@@ -160,17 +177,60 @@ final class DocumentedApiConformanceTests: XCTestCase {
         return url
     }
 
+    /// Writes an executable fake `pdftract` that records its argv one
+    /// argument per line into `<directory>/captured-argv.txt`, prints
+    /// `stdoutLines`, and exits 0 — SourceBytesPassthroughTests' capture
+    /// convention, without the spill copy (the input here is the test's own
+    /// fixture file, which the SDK never deletes). Only the decode-side
+    /// search test uses it: the child stands in for a binary whose `grep`
+    /// emits the documented Match NDJSON lines, a role no real binary can
+    /// play yet. Like StreamingStderrRegressionTests' fakes it ignores its
+    /// arguments' content — the argv capture, not the child's behavior, is
+    /// what proves which invocation it stood in for.
+    private static func writeArgCapturingGrep(
+        stdoutLines: [String]
+    ) throws -> (directory: URL, binaryPath: String, capturePath: String) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdftract-search-contract-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let capturePath = directory.appendingPathComponent("captured-argv.txt").path
+        let binaryPath = directory.appendingPathComponent("pdftract").path
+
+        var script = "#!/bin/sh\n"
+        script += "printf '%s\\n' \"$@\" > '\(capturePath)'\n"
+        for line in stdoutLines {
+            script += "echo '\(line)'\n"
+        }
+        script += "exit 0\n"
+
+        try script.write(toFile: binaryPath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binaryPath)
+        return (directory, binaryPath, capturePath)
+    }
+
+    /// Reads back the fake child's captured argv. Arguments arrive one per
+    /// line; every argument these tests produce is newline-free, so the
+    /// line split is lossless (SourceBytesPassthroughTests' parser verbatim).
+    private static func capturedArguments(from capturePath: String) throws -> [String] {
+        let raw = try String(contentsOfFile: capturePath, encoding: .utf8)
+        return raw
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map(String.init)
+    }
+
     // MARK: Drain helper
 
-    /// Consumes `stream` to completion, returning the pages in arrival order
-    /// (or rethrowing the stream's terminal error — the "the child must not
-    /// have failed" assertion for the pins that expect a clean exit).
-    private static func drain(_ stream: AsyncThrowingStream<Page, Error>) async throws -> [Page] {
-        var pages: [Page] = []
-        for try await page in stream {
-            pages.append(page)
+    /// Consumes `stream` to completion, returning the yielded values in
+    /// arrival order (or rethrowing the stream's terminal error — the "the
+    /// child must not have failed" assertion for the pins that expect a
+    /// clean exit). Generic over the element type so it serves both stream
+    /// flavors this file drives: `Page` (extractStream) and `Match` (search).
+    private static func drain<T>(_ stream: AsyncThrowingStream<T, Error>) async throws -> [T] {
+        var values: [T] = []
+        for try await value in stream {
+            values.append(value)
         }
-        return pages
+        return values
     }
 
     /// Thread-safe collector for `onSkippedLine`. The callback runs on the
@@ -442,6 +502,128 @@ final class DocumentedApiConformanceTests: XCTestCase {
         XCTAssertEqual(
             pages.count, 0,
             "block-shaped NDJSON lines must not decode into Pages; got \(pages.count)"
+        )
+    }
+
+    // MARK: The search pins — grep-subcommand divergence + the documented decode contract
+
+    /// PIN, not contract. README "Search" promises
+    /// `client.search(.path("document.pdf"), "invoice")` yields a `Match`
+    /// per hit with a zero-based `page` (the pdfswift-1a2fa6e0 convention)
+    /// and `context.before`/`.after` carrying the surrounding text. No
+    /// available binary can run search at all: the generated argv's
+    /// subcommand, `grep`, does not exist in any of them — the v1.2.0 musl
+    /// release (the README-linked release) and both local lineage builds
+    /// die in clap with "unrecognized subcommand 'grep'" (exit 2, mapped to
+    /// `CorruptPdfError` — another exit the README's error table does not
+    /// list this way). The child dies before the source argument is even
+    /// examined, which is what makes this a pure argv-layer pin: no PDF
+    /// behavior of any binary is involved. When a binary with a compatible
+    /// `grep` lands, this reds — flip it to asserting the yielded matches
+    /// against that binary's live output, keeping the decode-side shape
+    /// testSearchYieldsMatchesWithDocumentedPageAndContextFields pins.
+    func testSearchPinsTheCurrentGrepSubcommandDivergence() async throws {
+        let binary = try Self.requireBinary()
+        let fixture = try Self.makePDF(pageTexts: ["\(Self.markerPrefix) 0"])
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+
+        let client = Pdftract(binaryPath: binary)
+        do {
+            _ = try await Self.drain(
+                client.search(.path(fixture.path), Self.markerPrefix)
+            )
+            XCTFail("search returned matches — the grep-subcommand pin is stale; a compatible grep exists, assert the documented Match contract instead")
+        } catch let error as PdftractError {
+            XCTAssertEqual(
+                error.exitCode, 2,
+                "expected the child's clap 'unrecognized subcommand' error (exit 2), got exit \(error.exitCode)"
+            )
+            XCTAssertTrue(
+                error.message.contains("unrecognized subcommand 'grep'"),
+                "expected the unrecognized-'grep' usage error, got: \(error.message.prefix(200))"
+            )
+        }
+    }
+
+    /// The documented search contract, pinned on the decode side against a
+    /// fixture PDF. Deliberately NOT gated on a real binary (see the file
+    /// header): no available binary has a `grep` subcommand, so a gate would
+    /// skip this everywhere, forever. A fake child answers with the
+    /// documented wire shape — one Match NDJSON line per fixture page, page
+    /// indices drawn from the fixture's own page range, surrounding text
+    /// unique per page — and this test asserts what the README promises the
+    /// SDK yields:
+    ///
+    /// - matches are found: one per fixture page, carrying the searched
+    ///   pattern as `text` (the `\(match.text)` of the README example);
+    /// - `page` stays zero-based exactly as pdfswift-1a2fa6e0 documented
+    ///   (the fixture's own indices [0, 1, 2] — a decode-side `+1`, i.e.
+    ///   1-based pages, turns them into [1, 2, 3] and fails here);
+    /// - `context.before`/`.after` arrive in their own fields with their
+    ///   text intact — the `...\(before)[\(text)]\(after)...` shape the
+    ///   README example prints; swapped, trimmed, or dropped context fails
+    ///   the exact per-page equality.
+    ///
+    /// The captured argv proves the fixture PDF itself was the searched
+    /// input: `grep <pattern> <fixture path>` (pattern before source, as
+    /// SourceBytesPassthroughTests pins for `.bytes`; this is the `.path`
+    /// twin). This is the flip target for
+    /// testSearchPinsTheCurrentGrepSubcommandDivergence: when a real binary
+    /// gains a compatible `grep`, these decode assertions must keep holding
+    /// against its live output.
+    func testSearchYieldsMatchesWithDocumentedPageAndContextFields() async throws {
+        let pageCount = 3
+        let fixture = try Self.makePDF(
+            pageTexts: (0..<pageCount).map { "\(Self.markerPrefix) \($0)" }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+
+        // One match per fixture page. The context strings are unique per
+        // page, so a before/after swap cannot pass; the page indices are the
+        // fixture's own zero-based range, so a decode-side shift cannot.
+        // All lines are ASCII with no shell metacharacters, so they can sit
+        // inside the fake's single-quoted echo as-is.
+        let matchLines = (0..<pageCount).map { index in
+            "{\"text\":\"\(Self.markerPrefix)\",\"page\":\(index),"
+                + "\"bbox\":[72.0,720.0,120.0,732.0],"
+                + "\"context\":{\"before\":\"preamble \(index) before \","
+                + "\"after\":\" after \(index) trailing\"}}"
+        }
+        let fake = try Self.writeArgCapturingGrep(stdoutLines: matchLines)
+        defer { try? FileManager.default.removeItem(at: fake.directory) }
+
+        let client = Pdftract(binaryPath: fake.binaryPath)
+        let matches = try await Self.drain(
+            client.search(.path(fixture.path), Self.markerPrefix)
+        )
+
+        XCTAssertEqual(
+            matches.count, pageCount,
+            "expected one match per fixture page, got \(matches.count)"
+        )
+        XCTAssertEqual(
+            matches.map(\.text), Array(repeating: Self.markerPrefix, count: pageCount),
+            "every match must carry the searched pattern as its text"
+        )
+        XCTAssertEqual(
+            matches.map(\.page), Array(0..<pageCount),
+            "Match.page must stay zero-based — the fixture's own page range — as documented (README: same convention as Page.pageIndex; display match.page + 1)"
+        )
+        for (index, match) in matches.enumerated() {
+            XCTAssertEqual(
+                match.context.before, "preamble \(index) before ",
+                "context.before must carry the text before the match, intact (match \(index))"
+            )
+            XCTAssertEqual(
+                match.context.after, " after \(index) trailing",
+                "context.after must carry the text after the match, intact (match \(index))"
+            )
+        }
+
+        let argv = try Self.capturedArguments(from: fake.capturePath)
+        XCTAssertEqual(
+            argv, ["grep", Self.markerPrefix, fixture.path],
+            "search() must invoke grep with the pattern before the fixture path"
         )
     }
 }
