@@ -688,6 +688,41 @@ reported through the `onSkippedLine:` callback so one malformed line cannot
 masquerade as a failed extraction. An undecodable line passed over silently
 would be indistinguishable from a PDF that simply had fewer pages.
 
+### Where the CLI's stderr goes
+
+Every exit-code error's message **is** the failing command's stderr, verbatim.
+`message`, `localizedDescription`, and `errorDescription` all return it, so the
+examples above print the CLI's own diagnostic — the same text the command would
+have written to a terminal — with no SDK-written prefix, no truncation, and no
+reformatting: multi-line output keeps its lines. There is no separate `stderr`
+field to reach for; the message is the carrier. The streaming methods drain
+stderr concurrently with stdout, so output larger than the OS pipe buffer
+arrives complete rather than cut off at 64 KiB — a regression suite pins the
+tail of a 128 KiB stderr reaching the thrown error.
+
+Three failure kinds carry no CLI stderr in their message, because no CLI
+diagnostic describes them:
+
+- **Spawn failure** — a `binaryPath` that does not exist or is not
+  executable: no child ran, so there is no stderr to carry. The buffered
+  methods throw the SDK's `Failed to execute pdftract: …` message with the
+  underlying Foundation error; the streaming methods throw that error
+  unwrapped (see [binary paths](#binary-version-compatibility)).
+- **`TimeoutError`** — this SDK killed the child, so the message is the
+  SDK's own `pdftract did not finish within N seconds and was terminated`
+  sentence. The child's partial stderr is still drained — that is what
+  unblocks the reap — and then discarded on purpose: it describes a run
+  this SDK interrupted, not a failure the CLI reported.
+- **A non-zero exit with nothing on stderr** — the message is the empty
+  string; `verify-receipt`'s mismatch exits are the worked example above.
+  Print `error.exitCode` alongside the message, as the examples do, so a
+  silent CLI failure never becomes a silent log line.
+
+The failing command's **stdout** is discarded whenever the exit code is
+non-zero — only stderr feeds the thrown error. Any JSON the CLI printed
+before failing is visible only by calling the CLI directly; the
+`verify-receipt` section above walks through that case.
+
 ## Cancellation and timeouts
 
 Every SDK call spawns a `pdftract` child process. The SDK owns that child's
