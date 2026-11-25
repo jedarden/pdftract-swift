@@ -26,6 +26,7 @@ Swift SDK for pdftract - PDF extraction and analysis for server-side Swift.
 
 **Supported**: macOS 13+, Linux (server-side use only)
 **Unsupported**: iOS (Apple does not allow spawning subprocesses in App Store apps)
+**Toolchain**: Swift 5.10+ — the `swift-tools-version` declared in `Package.swift`
 
 **Using pdftract from an iOS app**: the SDK drives the `pdftract` binary by
 spawning it as a subprocess, which iOS forbids in App Store apps — so the SDK
