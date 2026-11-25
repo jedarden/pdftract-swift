@@ -67,11 +67,19 @@ public struct Pdftract: Sendable {
     ///   - timeout: Maximum seconds to let the child run. On expiry the child
     ///     is terminated (SIGTERM) and reaped, and `TimeoutError` is thrown.
     ///     `nil` (the default) waits indefinitely.
+    ///   - stdin: Optional payload pushed to the child's standard input
+    ///     before launch. This is the transport for the password leg of the
+    ///     CLI's `--password-stdin` channel (`ExtractOptions.password`) —
+    ///     the value must never travel in argv, where `ps` exposes it.
     /// - Returns: The stdout output as a String.
     /// - Throws: `PdftractError` if the process fails, `TimeoutError` when the
     ///   deadline expires, `CancellationError` if the surrounding Task is
     ///   cancelled (the child is terminated and reaped either way).
-    private func exec(_ args: [String], timeout: TimeInterval? = nil) async throws -> String {
+    private func exec(
+        _ args: [String],
+        timeout: TimeInterval? = nil,
+        stdin: Data? = nil
+    ) async throws -> String {
         if let timeout {
             guard timeout > 0, timeout.isFinite else {
                 throw TimeoutError("timeout must be a finite number of seconds > 0, got \(timeout)", -1)
@@ -86,6 +94,15 @@ public struct Pdftract: Sendable {
         process.standardOutput = outPipe
         process.standardError = errPipe
         process.arguments = args
+
+        // Optional stdin payload — the password leg of `--password-stdin`
+        // (see `ExtractOptions.password`). The pipe is retained by
+        // `process.standardInput`; the local keeps a second reference so it
+        // provably outlives the run on every path below.
+        var stdinPipe: Pipe?
+        if let stdin {
+            stdinPipe = Self.attachStdin(process, payload: stdin)
+        }
 
         let spawned = SpawnedProcess()
 
@@ -173,6 +190,37 @@ public struct Pdftract: Sendable {
         }
     }
 
+    /// Hands `payload` to the child as its standard input.
+    ///
+    /// The bytes are pushed and the write end closed BEFORE `process.run()`,
+    /// which is what makes this race-free: by the time the child exists there
+    /// is nothing left to write, so a child that exits without ever reading
+    /// its stdin (a usage error from a binary that predates
+    /// `--password-stdin`, say) can never SIGPIPE this process on a write to
+    /// a dead pipe — the payload simply dies unread with the child. Password
+    /// payloads are bytes-tiny, far under the ~64KB kernel pipe buffer, so
+    /// the pre-launch push cannot block.
+    ///
+    /// The returned pipe must stay referenced until the child has been
+    /// reaped; `process.standardInput` retains it, and the spawning site
+    /// keeps a local reference through the whole run.
+    private static func attachStdin(_ process: Process, payload: Data) -> Pipe {
+        let pipe = Pipe()
+        do {
+            try pipe.fileHandleForWriting.write(contentsOf: payload)
+        } catch {
+            // Unreachable in practice (empty pipe buffer, no child yet, no
+            // competing writer), but a failed decrypt request must not crash
+            // the caller: drop the payload and let the child run without a
+            // password — which surfaces as the CLI's own encrypted-PDF
+            // failure (exit 3 through `mapError`), never as a Foundation
+            // handle exception.
+        }
+        try? pipe.fileHandleForWriting.close()
+        process.standardInput = pipe
+        return pipe
+    }
+
     /// Maps CLI exit codes to Swift errors.
     /// - Parameters:
     ///   - stderr: The stderr output from the process.
@@ -243,7 +291,15 @@ public struct Pdftract: Sendable {
         args.append("--")
         args.append(contentsOf: prepared.arguments)
 
-        let output = try await exec(args, timeout: timeout)
+        // A password rides the `--password-stdin` flag `toArgs()` emitted,
+        // delivered as one newline-terminated line on the child's stdin —
+        // the CLI's secure channel. Empty strings stay unset (see
+        // `ExtractOptions.password`).
+        let stdinPayload = options.password.flatMap { password in
+            password.isEmpty ? nil : Data("\(password)\n".utf8)
+        }
+
+        let output = try await exec(args, timeout: timeout, stdin: stdinPayload)
 
         guard let data = output.data(using: .utf8) else {
             throw PdftractError("Failed to decode output", -1)
@@ -281,12 +337,17 @@ public struct Pdftract: Sendable {
         args.append(contentsOf: options.toArgs())
         
         args.append("--text")
-        
+
         args.append("--json")
         args.append("--")
         args.append(contentsOf: prepared.arguments)
 
-        let output = try await exec(args, timeout: timeout)
+        // Password leg, same transport as `extract` (see `ExtractOptions.password`).
+        let stdinPayload = options.password.flatMap { password in
+            password.isEmpty ? nil : Data("\(password)\n".utf8)
+        }
+
+        let output = try await exec(args, timeout: timeout, stdin: stdinPayload)
 
         // Parse JSON to verify it's valid, then extract the text field
         guard let data = output.data(using: .utf8),
@@ -329,12 +390,17 @@ public struct Pdftract: Sendable {
         args.append(contentsOf: options.toArgs())
         
         args.append("--md")
-        
+
         args.append("--json")
         args.append("--")
         args.append(contentsOf: prepared.arguments)
 
-        let output = try await exec(args, timeout: timeout)
+        // Password leg, same transport as `extract` (see `ExtractOptions.password`).
+        let stdinPayload = options.password.flatMap { password in
+            password.isEmpty ? nil : Data("\(password)\n".utf8)
+        }
+
+        let output = try await exec(args, timeout: timeout, stdin: stdinPayload)
 
         // Parse JSON to verify it's valid, then extract the text field
         guard let data = output.data(using: .utf8),
@@ -396,6 +462,19 @@ public struct Pdftract: Sendable {
                 process.standardOutput = outPipe
                 process.standardError = errPipe
                 process.arguments = args
+
+                // Password leg: same pre-launch stdin transport as the
+                // buffered exec path (see `ExtractOptions.password` and
+                // `Pdftract.attachStdin`). The pipe is retained by
+                // `process.standardInput`; the local keeps a second
+                // reference through the whole run.
+                var stdinPipe: Pipe?
+                if let password = options.password, !password.isEmpty {
+                    stdinPipe = Pdftract.attachStdin(
+                        process,
+                        payload: Data("\(password)\n".utf8)
+                    )
+                }
 
                 // Lifecycle: a dropped or cancelled sequence must terminate
                 // (SIGTERM) and reap the child. onTermination fires for every

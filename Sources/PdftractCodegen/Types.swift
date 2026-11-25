@@ -111,13 +111,42 @@ public struct ExtractOptions: Codable, Sendable {
     /// Minimum dimension (pixels) for image extraction.
     public var minImageSize: Int?
 
+    /// Password for an encrypted PDF.
+    ///
+    /// This is the way a caller reaches the remediation the error table
+    /// documents for `EncryptionError` (CLI exit 3, "password is
+    /// missing/wrong"): catch that error, retry the same call with this
+    /// field set, and the CLI decrypts the document instead of failing.
+    ///
+    /// Transport: the SDK forwards the password over the CLI's
+    /// `--password-stdin` channel — the value is written to the spawned
+    /// process's standard input, never to argv, where any user on the same
+    /// machine could read it back with `ps`. (The CLI's third channel,
+    /// `--password VALUE`, is rejected by the binary unless the caller
+    /// opts in via `PDFTRACT_INSECURE_CLI_PASSWORD=1`, and the SDK never
+    /// emits it. A `PDFTRACT_PASSWORD` environment variable set in this
+    /// process is inherited by the child and would also be honored — this
+    /// field exists so callers don't have to mutate process-global state
+    /// to decrypt one document.)
+    ///
+    /// Scope: the `extract` family only — `extract`, `extractText`,
+    /// `extractMarkdown`, `extractStream`. Those are the CLI surfaces that
+    /// implement decryption; `hash` and `verify-receipt` accept password
+    /// flags in the CLI but ignore them (v1.2.0), so no SDK method offers
+    /// one. An empty string is treated as no password at all (the field
+    /// stays unset and no flag is emitted): the CLI already tries the
+    /// empty password first per the PDF spec, so passing `""` explicitly
+    /// would request nothing that isn't already attempted.
+    public var password: String?
+
     public init(
         ocrLanguage: String? = nil,
         ocrThreshold: Double? = nil,
         preserveLayout: Bool? = nil,
         extractImages: Bool? = nil,
         imageFormat: String? = nil,
-        minImageSize: Int? = nil
+        minImageSize: Int? = nil,
+        password: String? = nil
     ) {
         self.ocrLanguage = ocrLanguage
         self.ocrThreshold = ocrThreshold
@@ -125,6 +154,7 @@ public struct ExtractOptions: Codable, Sendable {
         self.extractImages = extractImages
         self.imageFormat = imageFormat
         self.minImageSize = minImageSize
+        self.password = password
     }
 
     /// Converts options to CLI arguments.
@@ -151,6 +181,12 @@ public struct ExtractOptions: Codable, Sendable {
         if let minImageSize = minImageSize {
             args.append("--min-image-size")
             args.append(String(minImageSize))
+        }
+        if let password = password, !password.isEmpty {
+            // The value itself never goes through argv: the consumer methods
+            // pair this flag with the password bytes on the child's stdin
+            // (see `Pdftract.exec` and the `password` field's doc comment).
+            args.append("--password-stdin")
         }
         return args
     }

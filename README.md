@@ -172,6 +172,60 @@ argument (exit 2) whatever the value — so the field currently expresses
 intent ahead of binary support, and passing it makes today's CLI reject the
 whole call.
 
+### Encrypted PDFs
+
+Encrypted documents are the one case where a call can fail purely because a
+required *secret* is missing: the CLI exits 3 (`EncryptionError`) when a PDF
+is encrypted and the password is missing or wrong. Supply the password
+through `ExtractOptions.password`:
+
+```swift
+let options = ExtractOptions(password: "test")
+let doc = try await client.extract(.path("encrypted.pdf"), options: options)
+```
+
+The password is forwarded over the CLI's `--password-stdin` channel — one
+newline-terminated line on the spawned process's standard input. The value
+never appears in argv, where another user on the same machine could read it
+back with `ps`. Because it rides stdin, the option also composes with every
+`Source` form: `.path`, `.url`, and `.bytes` all carry the password the same
+way.
+
+The full remediation loop for the error the table above documents:
+
+```swift
+do {
+    let doc = try await client.extract(.path("encrypted.pdf"))
+} catch let error as EncryptionError {
+    // exit 3 — the PDF is encrypted and no password (or a wrong one) was
+    // supplied. Prompt, then retry the same call with the password set.
+    let password = promptForPassword()
+    let doc = try await client.extract(
+        .path("encrypted.pdf"),
+        options: ExtractOptions(password: password)
+    )
+}
+```
+
+Scope and edge cases:
+
+- **Extract family only.** `extract`, `extractText`, `extractMarkdown`, and
+  `extractStream` honor the field — those are the CLI surfaces that
+  implement decryption. `hash` and `verify-receipt` accept password flags in
+  the CLI but ignore them (v1.2.0), so no other SDK method offers one.
+- **Empty string means unset.** `password: ""` emits nothing: the CLI
+  already tries the empty password first per the PDF spec, so passing `""`
+  explicitly would request nothing that isn't already attempted.
+- **Per-call, not process-global.** The CLI also honors a
+  `PDFTRACT_PASSWORD` environment variable, which the child inherits from
+  your process — but that is global state every concurrent extraction
+  shares. The option exists so callers don't have to mutate process state
+  to decrypt one document; set the variable only if you want a
+  process-wide default.
+- The CLI's third channel, `--password VALUE` on argv, is rejected by the
+  binary unless the caller opts in with `PDFTRACT_INSECURE_CLI_PASSWORD=1`
+  (exit 64) — the SDK never emits it.
+
 ### Extract text
 
 ```swift
@@ -666,7 +720,12 @@ a base `PdftractError` clause placed first would swallow every subclass:
 do {
     let doc = try await client.extract(.path("document.pdf"))
 } catch let error as EncryptionError {
-    promptForPassword() // most specific clauses first
+    // most specific clauses first — supply the missing secret and retry;
+    // see "Encrypted PDFs" for the full loop
+    let doc = try await client.extract(
+        .path("document.pdf"),
+        options: ExtractOptions(password: promptForPassword())
+    )
 } catch let error as TimeoutError {
     retryOrFail() // deadline expiry — exit code -1
 } catch let error as PdftractError {
@@ -962,7 +1021,8 @@ let options = ExtractOptions(
     preserveLayout: false,        // Preserve original reading order
     extractImages: false,         // Extract embedded images
     imageFormat: "png",           // Format for images: png, jpg, webp
-    minImageSize: 64              // Minimum image dimension
+    minImageSize: 64,             // Minimum image dimension
+    password: "test"              // Password for an encrypted PDF (see "Encrypted PDFs")
 )
 ```
 
