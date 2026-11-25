@@ -486,6 +486,39 @@ public struct Pdftract: Sendable {
         onSkippedLine: (@Sendable (Error) -> Void)? = nil
     ) -> AsyncThrowingStream<Page, Error> {
         return AsyncThrowingStream { continuation in
+            // Lifecycle: a dropped or cancelled sequence must terminate the
+            // child (SIGTERM); reaping stays with the producer's post-EOF
+            // reap. The registration lives HERE, synchronously inside the
+            // build closure, for two platform-pinned reasons
+            // (swift:5.10-jammy, 2026-11-25, pdfswift-b64f41eb slice 2):
+            //
+            // 1. A registration made inside the producer Task can land AFTER
+            //    the sequence was already dropped: AsyncThrowingStream
+            //    ignores onTermination set on a terminated stream, so the
+            //    child of a dropped-then-launched sequence had no reaper at
+            //    all — the "dropped call leaves an orphaned pdftract
+            //    process" failure mode, observed live. Registered here, the
+            //    handler is live before any drop can exist, and the launch
+            //    guard plus post-launch stop check below honor a termination
+            //    that fired before the spawn.
+            //
+            // 2. The handler must not reap. On this Foundation,
+            //    waitUntilExit() parked across the child's death never
+            //    receives the exit event (the same wedge the buffered exec
+            //    path documents above its drain-before-reap ordering), so a
+            //    reap here — running on the dropping/consumer thread while
+            //    the child is still alive — parked that thread forever (a
+            //    plain loop break wedged the consumer inside its own deinit)
+            //    and left Foundation's running flag set, trapping the next
+            //    process.terminationStatus read with an illegal instruction.
+            //    terminate() alone is a non-blocking kill: the child's death
+            //    EOFs the producer's stdout read, and the post-EOF reap
+            //    below takes the fast path that always works on this
+            //    platform.
+            let spawned = SpawnedProcess()
+            continuation.onTermination = { @Sendable _ in
+                spawned.terminate()
+            }
             Task {
                 var args = ["extract", "--ndjson"]
                 let prepared: PreparedArgs
@@ -530,27 +563,19 @@ public struct Pdftract: Sendable {
                     )
                 }
 
-                // Lifecycle: a dropped or cancelled sequence must terminate
-                // (SIGTERM) and reap the child. onTermination fires for every
-                // ending — cancellation, break-out-of-the-loop, or normal
-                // completion — and can fire before the spawn below even runs
-                // (the producer lives in this unstructured Task) or after the
-                // child already exited on its own. terminate() is launch-safe
-                // and reap() idempotent, so this is correct in every
-                // interleaving; the old unconditional
-                // terminate()/waitUntilExit() pair trapped in both of those
-                // races.
-                let spawned = SpawnedProcess()
-                continuation.onTermination = { @Sendable _ in
-                    spawned.terminate()
-                    spawned.reap()
-                }
+                // Lifecycle: registration happened in the build closure (see
+                // the note there) — a dropped sequence always finds the
+                // handler live, and this producer only observes the stop
+                // request through the guard below.
 
                 do {
                     // The sequence may have been dropped before this task got
                     // to run. Never launch a child for a sequence that is
                     // already gone — that is the "dropped call leaves an
-                    // orphaned pdftract process" failure mode.
+                    // orphaned pdftract process" failure mode. The stop
+                    // request arrives through the onTermination handler
+                    // registered in the build closure above, so it covers a
+                    // drop that happened before this producer even ran.
                     guard !spawned.isStopRequested() else { return }
 
                     try Self.runWithDeliverableTermination(process)
@@ -624,8 +649,15 @@ public struct Pdftract: Sendable {
                         }
                     }
 
-                    // Reaps the child exactly once; a no-op if onTermination
-                    // already reaped it after killing the child mid-read.
+                    // The ONLY reaper, and the load-bearing ordering on this
+                    // platform: EOF above guarantees the child — the sole
+                    // holder of the pipe write ends — has already exited, so
+                    // this waitUntilExit() takes the fast path that always
+                    // works on swift:5.10-jammy (a call parked across the
+                    // death never receives the exit event; see the buffered
+                    // exec path's drain-before-reap note). A child killed by
+                    // onTermination's terminate() EOFs this read the same way,
+                    // so the drop path reaps here too.
                     spawned.reap()
 
                     // The child has exited, so the concurrent drain above has
@@ -667,6 +699,39 @@ public struct Pdftract: Sendable {
         onSkippedLine: (@Sendable (Error) -> Void)? = nil
     ) -> AsyncThrowingStream<Match, Error> {
         return AsyncThrowingStream { continuation in
+            // Lifecycle: a dropped or cancelled sequence must terminate the
+            // child (SIGTERM); reaping stays with the producer's post-EOF
+            // reap. The registration lives HERE, synchronously inside the
+            // build closure, for two platform-pinned reasons
+            // (swift:5.10-jammy, 2026-11-25, pdfswift-b64f41eb slice 2):
+            //
+            // 1. A registration made inside the producer Task can land AFTER
+            //    the sequence was already dropped: AsyncThrowingStream
+            //    ignores onTermination set on a terminated stream, so the
+            //    child of a dropped-then-launched sequence had no reaper at
+            //    all — the "dropped call leaves an orphaned pdftract
+            //    process" failure mode, observed live. Registered here, the
+            //    handler is live before any drop can exist, and the launch
+            //    guard plus post-launch stop check below honor a termination
+            //    that fired before the spawn.
+            //
+            // 2. The handler must not reap. On this Foundation,
+            //    waitUntilExit() parked across the child's death never
+            //    receives the exit event (the same wedge the buffered exec
+            //    path documents above its drain-before-reap ordering), so a
+            //    reap here — running on the dropping/consumer thread while
+            //    the child is still alive — parked that thread forever (a
+            //    plain loop break wedged the consumer inside its own deinit)
+            //    and left Foundation's running flag set, trapping the next
+            //    process.terminationStatus read with an illegal instruction.
+            //    terminate() alone is a non-blocking kill: the child's death
+            //    EOFs the producer's stdout read, and the post-EOF reap
+            //    below takes the fast path that always works on this
+            //    platform.
+            let spawned = SpawnedProcess()
+            continuation.onTermination = { @Sendable _ in
+                spawned.terminate()
+            }
             Task {
                 var args = ["grep"]
                 let prepared: PreparedArgs
@@ -697,27 +762,19 @@ public struct Pdftract: Sendable {
                 process.standardError = errPipe
                 process.arguments = args
 
-                // Lifecycle: a dropped or cancelled sequence must terminate
-                // (SIGTERM) and reap the child. onTermination fires for every
-                // ending — cancellation, break-out-of-the-loop, or normal
-                // completion — and can fire before the spawn below even runs
-                // (the producer lives in this unstructured Task) or after the
-                // child already exited on its own. terminate() is launch-safe
-                // and reap() idempotent, so this is correct in every
-                // interleaving; the old unconditional
-                // terminate()/waitUntilExit() pair trapped in both of those
-                // races.
-                let spawned = SpawnedProcess()
-                continuation.onTermination = { @Sendable _ in
-                    spawned.terminate()
-                    spawned.reap()
-                }
+                // Lifecycle: registration happened in the build closure (see
+                // the note there) — a dropped sequence always finds the
+                // handler live, and this producer only observes the stop
+                // request through the guard below.
 
                 do {
                     // The sequence may have been dropped before this task got
                     // to run. Never launch a child for a sequence that is
                     // already gone — that is the "dropped call leaves an
-                    // orphaned pdftract process" failure mode.
+                    // orphaned pdftract process" failure mode. The stop
+                    // request arrives through the onTermination handler
+                    // registered in the build closure above, so it covers a
+                    // drop that happened before this producer even ran.
                     guard !spawned.isStopRequested() else { return }
 
                     try Self.runWithDeliverableTermination(process)
@@ -791,8 +848,15 @@ public struct Pdftract: Sendable {
                         }
                     }
 
-                    // Reaps the child exactly once; a no-op if onTermination
-                    // already reaped it after killing the child mid-read.
+                    // The ONLY reaper, and the load-bearing ordering on this
+                    // platform: EOF above guarantees the child — the sole
+                    // holder of the pipe write ends — has already exited, so
+                    // this waitUntilExit() takes the fast path that always
+                    // works on swift:5.10-jammy (a call parked across the
+                    // death never receives the exit event; see the buffered
+                    // exec path's drain-before-reap note). A child killed by
+                    // onTermination's terminate() EOFs this read the same way,
+                    // so the drop path reaps here too.
                     spawned.reap()
 
                     // The child has exited, so the concurrent drain above has

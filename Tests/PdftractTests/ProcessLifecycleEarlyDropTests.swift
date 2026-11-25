@@ -48,13 +48,19 @@
 //
 // 4. What a child that refuses SIGTERM gets on early drop. The sequence's
 //    onTermination sends SIGTERM — exactly the README's signal — and does NOT
-//    escalate to SIGKILL: the child keeps living and the dropping caller
-//    keeps waiting (reap() parks in `waitUntilExit()`), the same
-//    no-escalation contract slice 1 pinned for buffered calls. Once such a
-//    child dies by other means, the dropping Task unblocks with
-//    `CancellationError` and the child is reaped. When a regeneration adds
-//    kill escalation, this test fails and forces a conscious update of the
-//    pin together with the README paragraph.
+//    escalate to SIGKILL: the child keeps living while the dropping caller is
+//    freed immediately (the drop handler is a non-blocking terminate; the
+//    reap happens on the producer's post-EOF fast path once the child does
+//    end), and no zombie is left behind. This is also the regression gate
+//    for a Foundation trap this suite exposed live: a drop handler that
+//    reaped across a still-living child parked `waitUntilExit()` forever on
+//    this platform (the exit event is never delivered to a call parked
+//    across the death), left Foundation's running flag set, and crashed the
+//    next `terminationStatus` read with an illegal instruction — this test
+//    failed that way before the fix and must never regress to it. When a
+//    regeneration adds kill escalation, the no-escalation assertion fails
+//    and forces a conscious update of the pin together with the README
+//    paragraph.
 //
 // Everything runs against stub binaries via `Pdftract(binaryPath:)` — no
 // real pdftract binary is needed and none is consulted, so the whole suite
@@ -365,9 +371,15 @@ final class ProcessLifecycleEarlyDropTests: XCTestCase {
                     + "the drop path is wedged on the pipe"
             )
         }
+        // The consumer observes whichever ending wins the race: the cancelled
+        // next() throws CancellationError, or the terminated child's death
+        // EOFs the producer first and finish() ends the loop cleanly. Both
+        // are prompt — the pinned property is the bounded return, not which
+        // error surfaced.
         XCTAssertTrue(
-            outcome.error is CancellationError,
-            "expected CancellationError from the cancelled consumer, got \(String(describing: outcome.error))"
+            outcome.error == nil || outcome.error is CancellationError,
+            "expected CancellationError or clean completion from the dropped consumer, "
+                + "got \(String(describing: outcome.error))"
         )
         XCTAssertGreaterThanOrEqual(
             collected.count,
@@ -390,13 +402,20 @@ final class ProcessLifecycleEarlyDropTests: XCTestCase {
     ///
     /// 1. the SDK delivers SIGTERM (the stub's marker proves delivery);
     /// 2. the SDK does NOT escalate to SIGKILL — the child is still alive
-    ///    after the bounded window, and the dropping Task is still waiting
-    ///    (reap() parks in `waitUntilExit()`). The README documents SIGTERM,
-    ///    nothing more; when the implementation grows kill escalation, this
+    ///    after the bounded window. The README documents SIGTERM, nothing
+    ///    more; when the implementation grows kill escalation, this
     ///    assertion fails and the pin and the README paragraph move together;
-    /// 3. once that child dies by other means, the dropping Task unblocks
-    ///    promptly with `CancellationError` — no caller is left blocked on a
-    ///    dead child's pipes — and the child is reaped.
+    /// 3. the dropping Task is freed immediately rather than wedged behind a
+    ///    child that refuses to die: the drop handler is a non-blocking
+    ///    terminate, and it returns `CancellationError` promptly. (A handler
+    ///    that reaped here instead parked `waitUntilExit()` forever on this
+    ///    platform and later crashed a `terminationStatus` read with an
+    ///    illegal instruction — this test failed exactly that way before the
+    ///    fix, so its green run is also the crash regression gate.)
+    /// 4. once that child dies by other means, nothing is left behind: the
+    ///    producer's stdout read EOFs and the post-EOF reap — the only
+    ///    reaper, called after the exit it waits for — clears the child from
+    ///    the process table.
     func testSigtermIgnoringChildIsNotEscalatedOnStreamEarlyDrop() async throws {
         let stub = track(try ProcessLifecycleHarness.writeStub(.ignoreSigterm(sleepSeconds: 60)))
         let client = Pdftract(binaryPath: stub.binaryPath)
@@ -413,47 +432,41 @@ final class ProcessLifecycleEarlyDropTests: XCTestCase {
 
         // Cancelling the consumer is one of the documented sequence endings:
         // next() throws CancellationError, the iterator is dropped, and
-        // onTermination terminates (SIGTERM) and reaps — reaping parks until
-        // the child actually ends.
+        // onTermination terminates (SIGTERM) without reaping.
         consumer.cancel()
 
-        let early = await ProcessLifecycleHarness.awaitOutcome(
-            of: consumer,
-            maxWaitSeconds: Self.noEscalationWindowSeconds
-        )
-        if early.returned {
-            XCTFail(
-                "the dropping Task finished inside the no-escalation window despite a SIGTERM-ignoring "
-                    + "child (error: \(String(describing: early.error))) — the SDK terminated a child "
-                    + "that refused SIGTERM, i.e. it escalated beyond the documented signal"
+        let outcome = await ProcessLifecycleHarness.awaitOutcome(of: consumer)
+        guard outcome.returned else {
+            return XCTFail(
+                "the dropping Task never returned — the drop path wedged behind a child that ignores SIGTERM"
             )
-        } else {
-            XCTAssertTrue(
-                ProcessLifecycleHarness.isProcessAlive(pid),
-                "SIGTERM-ignoring child \(pid) is gone — the SDK escalated to a kill the README does not document"
-            )
-            XCTAssertTrue(
-                ProcessLifecycleHarness.termWasDelivered(stub),
-                "the child ignored SIGTERM and the marker was never written — SIGTERM was not delivered, "
-                    + "so the SDK's termination never reached the process"
-            )
-
-            // The child dies by means the SDK did not supply (an operator's
-            // kill, in production terms). The dropping Task must unblock,
-            // throw CancellationError, and reap the child.
-            ProcessLifecycleHarness.killStub(stub)
-
-            let final = await ProcessLifecycleHarness.awaitOutcome(of: consumer)
-            guard final.returned else {
-                return XCTFail(
-                    "the SIGTERM-ignoring child died but the dropping Task is still blocked on its pipes"
-                )
-            }
-            XCTAssertTrue(
-                final.error is CancellationError,
-                "expected CancellationError once the child died, got \(String(describing: final.error))"
-            )
-            await ProcessLifecycleHarness.assertReaped(pid, label: "stream-sigterm-ignored")
         }
+        XCTAssertTrue(
+            outcome.error is CancellationError,
+            "expected CancellationError from the cancelled consumer, got \(String(describing: outcome.error))"
+        )
+
+        // The no-escalation window doubles as the marker's settling time: a
+        // delivered SIGTERM is serviced by the stub's trap within it, and a
+        // kill escalation (which would follow the drop immediately) would
+        // land inside it too.
+        try await Task.sleep(nanoseconds: Self.noEscalationWindowSeconds * 1_000_000_000)
+        XCTAssertTrue(
+            ProcessLifecycleHarness.isProcessAlive(pid),
+            "SIGTERM-ignoring child \(pid) is gone — the SDK escalated to a kill the README does not document"
+        )
+        XCTAssertTrue(
+            ProcessLifecycleHarness.termWasDelivered(stub),
+            "the child ignored SIGTERM and the marker was never written — SIGTERM was not delivered, "
+                + "so the SDK's termination never reached the process"
+        )
+
+        // The child dies by means the SDK did not supply (an operator's
+        // kill, in production terms). The producer's read EOFs and the
+        // post-EOF reap must clear the child from the process table — no
+        // zombie, and no crash on the way.
+        ProcessLifecycleHarness.killStub(stub)
+
+        await ProcessLifecycleHarness.assertReaped(pid, label: "stream-sigterm-ignored")
     }
 }
