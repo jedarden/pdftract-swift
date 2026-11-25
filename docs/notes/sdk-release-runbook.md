@@ -149,15 +149,22 @@ kubectl --server=http://traefik-iad-ci:8001 get workflow <name> -n argo-workflow
   -o jsonpath='{.status.phase}{"\n"}'
 ```
 
-Require `Succeeded` on a workflow **created after your push**. Two gotchas:
+Require `Succeeded` on a workflow **created after your push**. Three gotchas:
 
-- **The workflow object is reaped 30 minutes after success** (`ttlStrategy:
-  secondsAfterSuccess: 1800`), so check promptly after pushing. After that,
-  only the Argo UI (within its own TTL) remembers.
-- The workflow spec records no commit SHA (the sensor submits a bare
-  template ref). Matching a run to your push is by creation timestamp. When
-  that's ambiguous — rebases, bursts of pushes, TTL already elapsed — don't
-  guess; run the identical gate yourself against the exact SHA:
+- **The workflow object is reaped ~5 minutes after success** — this template
+  sets `secondsAfterSuccess: 300`, overriding the fleet-wide 30-minute
+  default (failures keep 30 min; completion 30 min). Observed 2026-11-25: a
+  succeeded run vanished within ~10 min of creation. Check within minutes of
+  pushing; afterwards, the archived workflow (Argo labels it
+  `workflow-archiving-status: Archived`) and the Argo UI are the only record.
+- **The run builds main HEAD at clone time, not "your" commit.** The
+  template does `git clone --depth 1 --branch main` and prints the resolved
+  SHA; the sensor submits a bare template ref carrying no SHA. If other
+  commits (e.g. fleet `chore(beads)` checkpoint pushes) landed between your
+  push and the run, it gated those too — fine as long as nothing
+  source-affecting intervened and your commit is an ancestor of what it
+  built. When that's ambiguous, don't guess; run the identical gate
+  yourself against the exact SHA:
 
   ```bash
   D=$(mktemp -d) && git archive HEAD | tar -x -C "$D" && docker run --rm \
