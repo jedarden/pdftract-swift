@@ -413,6 +413,19 @@ stdout) is discarded when the SDK maps a non-zero exit, so the thrown error
 carries the CLI's stderr — empty on the mismatch exits. Call the CLI directly
 when you need the per-check detail.
 
+Against the pinned 1.2.0 binary this first check is not a tail case: the
+binary's `extract` embeds one fingerprint in receipts while its
+`verify-receipt` recomputes a different one from the same PDF (observed on
+every fixture tried — the two subcommands hash different document state),
+so the fingerprint check fails for **every** receipt `extract` produces,
+untampered ones included. On that binary `verifyReceipt` cannot succeed
+for any extract-produced receipt: verification stops at the first check,
+exits 10, and the SDK throws `ReceiptVerifyError` carrying an empty
+stderr. The receipt's expected and the recomputed actual fingerprints sit
+side by side only in the CLI's `verify-receipt --json` stdout, which the
+SDK discards — call the CLI directly to confirm a mismatch is this
+divergence rather than tampering.
+
 ## Result types
 
 Every decoded result is a plain `Codable` and `Sendable` struct. The tables
