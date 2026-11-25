@@ -1,5 +1,14 @@
 //
-// Regression tests for the README "Error handling" exit-code contract.
+// Regression tests for the README "Error handling" section contract.
+//
+// The section makes two promises. First, the exit-code table: a failing
+// pdftract invocation surfaces as the documented error type for each
+// documented exit code (pinned by the rows below). Second, its closing note
+// that some errors "come from the SDK instead" of from CLI exit codes —
+// process-lifecycle failures where no CLI exit code exists to map. The
+// lifecycle half is pinned here too: a `binaryPath` that cannot be spawned
+// (nonexistent, or present without an execute bit) throws the SDK's own
+// lifecycle error, never a mapped CLI code.
 //
 // Hand-written, not generated: this file is not a codegen template output, so
 // `pdftract sdk codegen` leaves it alone (the generator only writes files that
@@ -9,13 +18,15 @@
 // Committed by the pdfswift-4c6b8017 pre-flight after the authoring dispatch
 // left it untracked; compile+run verified against swift:5.10.1 (the
 // swift:5.10-jammy CI gate image) on 2026-09-23: `swift build`,
-// `swift build --build-tests`, and all 6 tests pass.
+// `swift build --build-tests`, and all 6 tests pass. The SDK-side lifecycle
+// section is the pdfswift-e83b1b91 addition (re-verified in the same image).
 //
 
 import XCTest
 @testable import Pdftract
 
-/// Pins the README error table to `Pdftract.mapError`.
+/// Pins the README error table to `Pdftract.mapError`, and the section's
+/// SDK-side lifecycle errors to the `exec` spawn path.
 ///
 /// README.md promises a precise contract: a failing pdftract invocation must
 /// surface as the documented error type for each documented exit code —
@@ -25,6 +36,12 @@ import XCTest
 /// one untested-contract defect (the PascalCase naming bug) because nothing
 /// compiled the package; a mapping drift would be the same class of failure
 /// one level deeper, compiling cleanly while misclassifying every CLI error.
+///
+/// The table's rows only cover children that actually ran. A child that never
+/// spawns — the configured `binaryPath` does not exist, or exists without an
+/// execute bit — has no exit code to map, and is exactly where the README's
+/// closing note points: the error "comes from the SDK instead". Those tests
+/// live in the lifecycle section at the bottom of this class.
 ///
 /// The tests drive a stub `pdftract` binary that writes a recognizable line to
 /// stderr and exits with the code under test, so no real pdftract (and no
@@ -307,6 +324,157 @@ final class ExitCodeMappingTests: XCTestCase {
             return XCTFail("classify returned instead of throwing")
         } catch {
             assertRow(row, threw: error)
+        }
+    }
+
+    // MARK: SDK-side lifecycle errors (README: errors that "come from the SDK instead")
+
+    /// The README error-handling section's closing note separates the errors
+    /// the CLI itself reports (the table above, all routed through
+    /// `mapError`) from lifecycle errors the SDK throws itself. The most
+    /// basic lifecycle failure is a child that never spawns at all: a
+    /// `binaryPath` that does not exist, or exists without an execute bit.
+    /// No CLI process ran, so there is no exit code to map and nothing the
+    /// CLI printed to carry — the documented contract is the SDK's
+    /// client-side shape, the same one `TimeoutError` documents for its own
+    /// client-side failure ("`exitCode` is `-1`, like the SDK's other
+    /// client-side errors"):
+    ///
+    /// - the *plain base* `PdftractError` — not `TimeoutError`, which is
+    ///   reserved for children that ran and were killed for time, and would
+    ///   send a deadline-aware caller into an unjustified retry;
+    /// - `exitCode == -1`, the client-side convention;
+    /// - a message prefixed `Failed to execute pdftract:`, the SDK-owned
+    ///   marker (with the underlying Foundation spawn error appended) that
+    ///   distinguishes this failure from any CLI-reported stderr.
+    ///
+    /// The buffered `exec` path wraps the Foundation spawn error into exactly
+    /// that shape; these tests pin it so a regeneration cannot silently
+    /// re-throw the raw NSError (uncatchable by the README's own
+    /// `catch let error as PdftractError` example) or mislabel the failure.
+    private func assertSdkLifecycleError(
+        _ error: Error,
+        _ scenario: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard let pdftractError = error as? PdftractError else {
+            // The README example only binds through `as PdftractError`; a
+            // raw Foundation error would break every caller that copies it.
+            return XCTFail(
+                "\(scenario): threw \(type(of: error)), which the README example's `catch let error as PdftractError` would not catch",
+                file: file,
+                line: line
+            )
+        }
+        XCTAssertTrue(
+            type(of: pdftractError) == PdftractError.self,
+            "\(scenario): expected the plain base PdftractError, got \(type(of: pdftractError)) — a subclass (e.g. TimeoutError) mislabels a never-spawned child",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            pdftractError.exitCode,
+            -1,
+            "\(scenario): SDK-side lifecycle failure must carry the client-side exit code -1, got \(pdftractError.exitCode)",
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(
+            pdftractError.message.hasPrefix("Failed to execute pdftract:"),
+            "\(scenario): message must identify the SDK as the thrower via the 'Failed to execute pdftract:' prefix, got: \(pdftractError.message)",
+            file: file,
+            line: line
+        )
+    }
+
+    /// `extract` around a `binaryPath` pointing at a file that does not
+    /// exist. The path is randomized so a stray `pdftract` appearing at that
+    /// literal location can never flip the test to a real spawn.
+    func testNonexistentBinaryPathThrowsSdkLifecycleErrorOnExtract() async throws {
+        let client = Pdftract(binaryPath: "/nonexistent/pdftract-\(UUID().uuidString)")
+
+        do {
+            _ = try await client.extract(.path("document.pdf"))
+            return XCTFail("extract returned instead of throwing for a nonexistent binaryPath")
+        } catch {
+            assertSdkLifecycleError(error, "nonexistent binaryPath")
+        }
+    }
+
+    /// `extract` around a `binaryPath` pointing at an existing file with no
+    /// execute bit. Root cannot exec it either — the kernel denies execve on
+    /// a file with no x bit set (verified 2026-11-24 in swift:5.10-jammy, the
+    /// root-user CI gate image: `chmod 644 x && ./x` → "Permission denied") —
+    /// so the EACCES spawn failure this test pins holds in the gate too.
+    func testNonExecutableBinaryPathThrowsSdkLifecycleErrorOnExtract() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdftract-non-executable-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let binaryPath = directory.appendingPathComponent("pdftract").path
+        try "#!/bin/sh\necho this file must never run\n".write(
+            toFile: binaryPath,
+            atomically: true,
+            encoding: .utf8
+        )
+        // 0644: readable but not executable. If the SDK ever started this
+        // file, the shebang would make the failure loud instead of silent.
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: binaryPath)
+
+        let client = Pdftract(binaryPath: binaryPath)
+
+        do {
+            _ = try await client.extract(.path("document.pdf"))
+            return XCTFail("extract returned instead of throwing for a non-executable binaryPath")
+        } catch {
+            assertSdkLifecycleError(error, "non-executable binaryPath")
+        }
+    }
+
+    /// Every remaining buffered method shares the single `exec` path with
+    /// `extract` (`verifyReceipt` included), so one lifecycle scenario proves
+    /// they all wrap a never-spawned child identically rather than letting
+    /// the raw Foundation error escape per-method.
+    func testRemainingBufferedMethodsShareTheSdkLifecycleError() async throws {
+        let client = Pdftract(binaryPath: "/nonexistent/pdftract-\(UUID().uuidString)")
+
+        do {
+            _ = try await client.extractText(.path("document.pdf"))
+            return XCTFail("extractText returned instead of throwing")
+        } catch {
+            assertSdkLifecycleError(error, "nonexistent binaryPath (extractText)")
+        }
+        do {
+            _ = try await client.extractMarkdown(.path("document.pdf"))
+            return XCTFail("extractMarkdown returned instead of throwing")
+        } catch {
+            assertSdkLifecycleError(error, "nonexistent binaryPath (extractMarkdown)")
+        }
+        do {
+            _ = try await client.getMetadata(.path("document.pdf"))
+            return XCTFail("getMetadata returned instead of throwing")
+        } catch {
+            assertSdkLifecycleError(error, "nonexistent binaryPath (getMetadata)")
+        }
+        do {
+            _ = try await client.hash(.path("document.pdf"))
+            return XCTFail("hash returned instead of throwing")
+        } catch {
+            assertSdkLifecycleError(error, "nonexistent binaryPath (hash)")
+        }
+        do {
+            _ = try await client.classify(.path("document.pdf"))
+            return XCTFail("classify returned instead of throwing")
+        } catch {
+            assertSdkLifecycleError(error, "nonexistent binaryPath (classify)")
+        }
+        do {
+            _ = try await client.verifyReceipt("document.pdf", receipt: Receipt(data: "stub"))
+            return XCTFail("verifyReceipt returned instead of throwing")
+        } catch {
+            assertSdkLifecycleError(error, "nonexistent binaryPath (verifyReceipt)")
         }
     }
 }

@@ -56,6 +56,11 @@
 
 import XCTest
 @testable import Pdftract
+// White-box access to PdftractCodegen internals (`Source.toArgs`,
+// `PreparedArgs.cleanUp`): `@testable import Pdftract` alone only opens the
+// re-export shell in Pdftract.swift — the re-exported public API — not the
+// defining module's internal declarations.
+@testable import PdftractCodegen
 
 final class SourceBytesPassthroughTests: XCTestCase {
     // MARK: Fixture
@@ -293,7 +298,14 @@ final class SourceBytesPassthroughTests: XCTestCase {
             )
         }
 
-        try Self.capturedInput(from: stub.inputCopyPath) // the spill reached the failing child
+        // The spill reached the failing child: byte-identical content, same
+        // idiom as the success path above (left unused, the read discards its
+        // result and asserts nothing).
+        XCTAssertEqual(
+            try Self.capturedInput(from: stub.inputCopyPath),
+            Self.pdfBytes,
+            "the spill did not reach the failing child with the caller's bytes"
+        )
 
         let argv = try Self.capturedArguments(from: stub.capturePath)
         let spill = try Self.assertSpillArgument(argv, sourceArgumentIndex: 2)
