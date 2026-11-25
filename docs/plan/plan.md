@@ -9,99 +9,110 @@ models. It ships as a SwiftPM library (`Pdftract` product) for server-side Swift
 Linux); iOS is explicitly unsupported because App Store apps can't spawn subprocesses — iOS
 consumers are told to talk to `pdftract serve` over HTTP instead.
 
-There is no separate `docs/notes/` or `docs/research/` content yet and no prior `plan.md` — this
-file starts honestly, at the point this artifact-improvement audit found the repo, rather than
-reconstructing a retroactive history. See `README.md` for the full usage/API reference; this
-file is for decisions and forward-looking notes.
+There was no prior `plan.md` — this file starts honestly, at the point the 2026-07-20
+artifact-improvement audit found the repo, and grows by dated updates. The "Current shipped
+state" section below was re-anchored to present tense on 2026-11-25 (pdfswift-e71c2c1e); the
+audit-era snapshot it replaced is condensed into that section's history list. See `README.md`
+for the full usage/API reference; this file is for decisions and forward-looking notes.
 
-The first hand-written `docs/notes/` document is
-[`docs/notes/codegen-refresh.md`](../notes/codegen-refresh.md) — how to regenerate this repo
-from the pdftract codegen pipeline (which command emits which paths, `.codegen-version`
-lockstep with binary releases, how to read `pdftract sdk validate` findings, and the
-fix-upstream-then-regenerate rule that ADR-1 depends on), plus a CI map of which
-iad-ci workflow runs where. (Until 2026-11-24 this section also explained why bare
-`swift test` could not pass without the real binary installed; the
-pdfswift-8f868708 XCTSkip guards below removed that constraint.)
+The hand-written `docs/notes/` set — everything here survives every codegen refresh:
+[`codegen-refresh.md`](../notes/codegen-refresh.md) — how to regenerate this repo from the
+pdftract codegen pipeline (which command emits which paths, `.codegen-version` lockstep with
+binary releases, how to read `pdftract sdk validate` findings, the
+fix-upstream-then-regenerate rule that ADR-1 depends on, and the CI map of which iad-ci
+workflow runs where); [`sdk-release-runbook.md`](../notes/sdk-release-runbook.md) — the
+manual tag-and-mirror release procedure; [`url-fetch-semantics.md`](../notes/url-fetch-semantics.md);
+and the `probes/` TLS/fetch-probe harness fixtures.
 
-## Current shipped state (as of 2026-07-20 audit)
+## Current shipped state (re-anchored 2026-11-25, pdfswift-e71c2c1e)
 
-- Single commit (`717e5f3`, "Initial commit: Swift SDK for pdftract v1.1.0"), `main` branch,
-  working tree clean.
-- `.codegen-version` = `1.1.0`; `Sources/PdftractCodegen/*` and
-  `Sources/Pdftract/Pdftract.swift` are marked auto-generated ("do not edit manually — use the
-  code generator to refresh").
-- ~~No git tags exist on this repo (checked both local and `origin` after `git fetch --tags`).~~
-  Resolved 2026-09-24 (bf-4mw): `v1.1.0` annotated tag pushed to `origin` and confirmed on the
-  GitHub mirror, so the README's `from: "1.1.0"` SwiftPM requirement resolves. (A local-only
-  `needle-cleanup-backup-20260801` tag from a fleet cleanup also exists; it is not semver and
-  was never pushed.)
-- `origin` remote is `https://github.com/jedarden/pdftract-swift.git` directly — this repo does
-  not currently follow the workspace's Forgejo-primary / GitHub-mirror hosting convention (see
-  follow-up beads under ADR-1 below).
+**Hosting.** Forgejo-primary: `origin` =
+`https://git.ardenone.com/jedarden/pdftract-swift.git`; GitHub
+(`https://github.com/jedarden/pdftract-swift`) is the read-only mirror the README's install
+snippet points consumers at, kept current by Forgejo's server-side push mirror. Local `main`
+== `origin/main` (nothing unpushed) at this rewrite.
 
-Status update 2026-09-26 (pdfswift-55d2f9e8): the snapshot above is one drop
-stale. The tree has been regenerated against pdftract 1.2.0 — f72f9a5
-(pdfswift-3bc489ab), then 84b1482 to pick up the drop-before-iteration
-lifecycle-test fix from pdftract a2ed4c967 — so `.codegen-version` = `1.2.0`,
-the README install snippet now reads `from: "1.2.0"`, and the generated API
-carries the timeout/cancellation support the `1.1.0` drop predated. `origin`
-has since moved to Forgejo, with GitHub
-(`https://github.com/jedarden/pdftract-swift`) as the mirror the README's
-install snippet points consumers at. The regeneration also silently recreated
-ADR-1 defect #1 at the new version: the only semver tag was still `v1.1.0`, so
-the README's own `from: "1.2.0"` requirement resolved nowhere.
-Resolved 2026-09-26 (pdfswift-55d2f9e8): `v1.2.0` (annotated, → `01a5b44`)
-pushed to Forgejo `origin` and mirror-confirmed on GitHub (`refs/tags/v1.2.0`
-via `ls-remote`), the URL the README's `from: "1.2.0"` requirement resolves
-against — tagged only after `pdftract-swift-build` went green on that exact
-commit (run `fnrbs`). pdfswift-3307a377's end-to-end binary verification is
-retargeted from a v1.1.0 binary to the 1.2.0 drop's binary, built from
-pdftract main `a2ed4c967`; upstream pdftract has not cut a v1.2.0 release tag
-yet (only `v0.1.0-test`), so the release-cascade `pdftract-swift-publish` run
-that exercises the real release binary can't fire until it does.
+**Generated drop.** `.codegen-version` = `1.2.0` — the 1.2.0 regeneration of the pdftract
+codegen pipeline (f72f9a5, then 84b1482 for the drop-before-iteration lifecycle-test fix from
+pdftract `a2ed4c967`), subsequently refreshed from the same still-unlanded pdftract local-main
+lineage: the pdfswift-8f868708 XCTSkip/probe fixes (61d59402), then the pdfswift-215641c8
+Sendable/concurrency semantics (pdftract `ae0a158d`, landed here as a87876f8). All nine
+generated paths carry the `GENERATED` marker ("do not edit manually — use the code generator
+to refresh"; `docs/notes/codegen-refresh.md` is that instruction's "use the code generator"
+half). `pdftract sdk validate` against the generator that produced the tree (ae0a158d)
+reports zero `MODIFIED`/`MISSING` under generated paths — only the benign README
+0.1.0-comparison artifact (validate has no `--version` flag and always compares against a
+0.1.0 skeleton).
 
-Status update 2026-11-24 (pdfswift-8f868708): bare `swift test` now passes
-without pdftract installed. The binary-dependent tests in the generated
-`ConformanceTests.swift` skip cleanly via a `requireBinary()` XCTSkip guard
-that mirrors the client's PATH resolution (`isExecutableFile`, the same
-pattern the hand-written `ExtractStreamConformanceTests` already used), so
-every suite either runs (the fake/stub-binary ones) or skips (the
-real-binary ones) in a binary-less environment. The guard surfaced a second,
-latent defect in the same test: `testBinaryAvailable` asserted
-`pdftract --version`, but the CLI registers no `--version` flag — the probe
-exited 2 on every real binary, meaning the suite could never pass anywhere a
-binary *was* installed either (unobservable until now because the suite only
-ever ran without one). The probe is now `--help`, which every pdftract build
-answers with exit 0. Fixed in the template on pdftract local main (unlanded
-lineage, same standing as the `a2ed4c967` lifecycle-test fix) and
-regenerated here as a 50/3-line delta in `Tests/PdftractTests/ConformanceTests.swift`
-only; `pdftract sdk validate` reports zero MODIFIED/MISSING findings under
-generated paths. Consequence for CI: the conformance-suite reason for the
-build gate's `--filter 'StreamingStderrRegressionTests|ExitCodeMappingTests'`
-is gone — binary-less, `ExtractStreamConformanceTests` now skips cleanly and
-could be safely added to the gate. A wholesale filter drop is still blocked
-by a pre-existing, unrelated condition: `ProcessLifecycleTests` fails 3/6 in
-docker-class containers (identical on the pre-guard tree — cancellation,
-timeout, and drop-before-iteration don't reach the spawned child there), so
-adding it would turn the gate red until that is understood. Loosening the
-filter is a declarative-config change (`pdftract-swift-build-workflowtemplate.yml`)
-and remains to be made there. Full unfiltered run *with* a real binary on
-PATH is still pdfswift-3307a377's verification.
+**Releases.** `v1.1.0` (annotated, → `01d83b0`) and `v1.2.0` (annotated, → `01a5b44`) are both
+pushed to Forgejo `origin` and confirmed on the GitHub mirror (`ls-remote`, 2026-11-25), so
+the README's `from: "1.2.0"` requirement resolves on the URL it names. Both were cut manually
+per `docs/notes/sdk-release-runbook.md`, tagged only after the gate went green on the exact
+tree — the release-cascade Swift slot (`sdk-swift-publish`) remains hard-off
+(`when: 'false'`) pending the four runbook-listed fixes, and upstream pdftract still hasn't
+cut a v1.2.0 release tag (only `v0.1.0-test`), so the cascade could not fire regardless.
+pdfswift-3307a377's real-binary end-to-end verification stays retargeted to a 1.2.0-lineage
+binary built from pdftract main.
 
-Status update 2026-11-25 (pdfswift-d971f54f): the "macOS 13+" in the
-platform claim above is **declared-but-untested**. Every verification path —
-the `pdftract-swift-build` and `pdftract-swift-publish` gates (both
-`swift:5.10-jammy`) and the docker recipe in `codegen-refresh.md` — proves
-Linux only, and there is no macOS host in the fleet to add coverage on.
-Worse than unverified: inspection of the never-compiled macOS branches found
-the binary-discovery PATH scan splits on `;` for non-Linux platforms
-(`Methods.swift:34` + mirrored test helper), which cannot find `pdftract` on
-a stock colon-separated macOS PATH — so default-init clients are believed
-broken on macOS outright. All affected sites are generated; the fix (and any
-README rewording) belongs in the upstream pdftract templates per the
-fix-upstream-first rule. Full analysis and the manual-macOS-host verification
-recipe: `docs/notes/codegen-refresh.md` → "Platform coverage: macOS 13+ is
-declared-but-untested".
+**CI.** `pdftract-swift-build` (WorkflowTemplate in declarative-config
+`k8s/iad-ci/argo-workflows/`, ArgoCD-owned/synced) auto-triggers on every push to `main` via
+`pdftract-swift-ci-sensor` (argo-events; webhook → EventSource → Sensor → submit, proven by
+bf-57b and re-proven post-Forgejo-migration 2026-09-25). Gate on `swift:5.10-jammy`:
+`swift build` + `swift build --build-tests` + `swift test --skip ProcessLifecycleTests` — the
+expanded gate from declarative-config `b947d7a35` (live 2026-11-25). The original two-suite
+`--filter` lost its reason when the pdfswift-8f868708 XCTSkip guards made the binary-dependent
+suites skip cleanly, while `ProcessLifecycleTests` still fails 3/6 in docker-class containers
+for environment reasons (drop the `--skip` when pdfswift-b64f41eb lands). The gate has
+verified teeth (bf-25c): reverting the lowerCamelCase API surface on a throwaway branch makes
+`swift build --build-tests` exit 1, and it went green on three consecutive runs under load.
+Latest proof (2026-11-25): the auto-triggered run `pdftract-swift-build-v7hq6` (auto-generated
+name, no `-manual-` suffix) Succeeded — node exitCode 0, 03:27:46Z→03:35:04Z — against main
+`5d805bb7`, and the same three-step gate re-run locally on a clean `git archive HEAD`
+extraction of `5d805bb7`: 34 tests, 6 binary-dependent skips, 0 failures. Full CI map:
+`codegen-refresh.md` → "What runs where (CI map)".
+
+**Verification doctrine shipped.** ADR-1 is fully resolved (follow-up list below): the
+compatibility shim shipped (6e19810) and was then deleted (d7009cb) once upstream emitted
+lowerCamelCase directly (pdftract `54b432f8`); CI shipped and was verified with a negative
+test; both semver tags shipped and were mirror-confirmed; the release runbook and the codegen
+refresh guide are in-repo and current. The five bf-era CI/release beads (bf-3vc, bf-3fw,
+bf-25c, bf-57b, bf-4mw) and their verification children (pdfswift-4aae6077,
+pdfswift-a6304661) are closed on that evidence.
+
+**Known-open themes (not shipped).** The generated client still cannot drive any released
+pdftract binary — argv/JSON-schema/NDJSON-page-frame/zero-page protocol mismatch demonstrated
+against v1.2.0, held at proposal pdfswift-ccccb2ff pending explicit admission. macOS 13+ is
+declared-but-untested and the macOS path is believed broken outright: the generated
+binary-discovery scan splits `PATH` on `;` off-Linux (`Methods.swift:34`), so a stock
+colon-separated macOS PATH never resolves `pdftract` — full analysis and the
+manual-macOS-host recipe: `codegen-refresh.md` → "Platform coverage". A queue of
+README-semantics documentation beads (page-index conventions, hash/classify/receipt
+semantics, streaming `try await` examples, OCR fields, error hierarchy, …) remains open, each
+scoped in its own bead.
+
+### Superseded snapshots (condensed from the pre-replace addenda)
+
+- 2026-07-20 audit: single commit `717e5f3` ("Initial commit: Swift SDK for pdftract
+  v1.1.0"), `.codegen-version` = `1.1.0`, no tags anywhere, `origin` pointed at GitHub
+  directly, and the generated PascalCase API broke every README sample and the test target →
+  ADR-1 below. (A local-only `needle-cleanup-backup-20260801` tag from a fleet cleanup also
+  existed; not semver, never pushed.)
+- 2026-07-22: shim shipped (6e19810), then deleted (d7009cb) after the upstream `lc_first`
+  filter fix (`54b432f8`) made the generated API lowerCamelCase natively.
+- 2026-09-24: ADR-1 follow-ups resolved — CI template + sensor shipped and verified (bf-3vc,
+  bf-25c, bf-57b); `v1.1.0` tagged and mirror-confirmed (bf-4mw) after gate run `manual-tn26m`
+  went green on that exact commit `01d83b0`.
+- 2026-09-26: regenerated against pdftract 1.2.0 (f72f9a5, pdfswift-3bc489ab; then 84b1482 for
+  the `a2ed4c967` lifecycle-test fix) — `.codegen-version` = `1.2.0`; `v1.2.0` tagged and
+  mirror-confirmed (pdfswift-55d2f9e8) after gate run `fnrbs` went green; `origin` moved to
+  Forgejo with GitHub as mirror.
+- 2026-11-24: bare `swift test` passes binary-less — `requireBinary()` XCTSkip guards plus the
+  `--help` probe fix (the old `--version` probe exited 2 on every real binary;
+  pdfswift-8f868708, 61d59402).
+- 2026-11-25: macOS declared-but-untested + believed-broken `;` PATH split documented
+  (pdfswift-d971f54f); CI gate expanded to the full suite minus `ProcessLifecycleTests`
+  (declarative-config `b947d7a35`); Sendable/concurrency drop regenerated
+  (pdfswift-215641c8, a87876f8).
 
 ## ADR-1: 2026-07-20 — CI-gated build/release pipeline for the generated Swift SDK, plus an interim naming-compatibility shim
 
